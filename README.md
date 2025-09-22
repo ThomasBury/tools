@@ -175,7 +175,55 @@ Scans repositories for TODO comments and task files.
 ./mdtodo.py tasks --file tasks.yaml
 ```
 
-### 7. `doctype.py` - Docstring and Type Hint Generator
+### 7. `daily_flow.py` - MCP-Powered Daily Workflow Agent 🌟
+Comprehensive daily workflow automation using Model Context Protocol.
+
+**Features:**
+- **MCP Integration**: Connects to multiple data sources via MCP servers
+- **Unified View**: Aggregates data from filesystem, git, GitHub, calendar
+- **Intelligent Reports**: AI-powered insights and recommendations
+- **Standup Automation**: Generate daily standup reports instantly
+- **Blocker Analysis**: Identify and resolve workflow blockers
+- **Multiple Formats**: Export as markdown, JSON, or terminal display
+
+**MCP Servers Used:**
+- Filesystem MCP - For notes and documents
+- Git MCP - For repository activity
+- GitHub MCP - For PRs and issues
+- Extensible to Slack, Calendar, Obsidian, etc.
+
+**Usage:**
+```bash
+# Generate daily standup
+./daily_flow.py standup
+
+# Weekly review
+./daily_flow.py review --days 7
+
+# Get today's focus items
+./daily_flow.py focus
+
+# Analyze blockers
+./daily_flow.py blockers
+
+# Export report as markdown
+./daily_flow.py export --format markdown --output standup.md
+
+# Check MCP server status
+./daily_flow.py config
+```
+
+**Setup MCP Servers:**
+```bash
+# Install MCP servers (one-time)
+npm install -g @modelcontextprotocol/server-filesystem
+npm install -g @modelcontextprotocol/server-git
+
+# Optional: Set GitHub token for GitHub integration
+export GITHUB_TOKEN="your-github-token"
+```
+
+### 8. `doctype.py` - Docstring and Type Hint Generator
 Automatically adds comprehensive docstrings and type hints to Python code.
 
 **Features:**
