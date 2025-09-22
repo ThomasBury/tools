@@ -175,6 +175,37 @@ Scans repositories for TODO comments and task files.
 ./mdtodo.py tasks --file tasks.yaml
 ```
 
+### 7. `doctype.py` - Docstring and Type Hint Generator
+Automatically adds comprehensive docstrings and type hints to Python code.
+
+**Features:**
+- Analyzes code to understand function signatures and logic
+- Generates docstrings in multiple styles (NumPy, Google, Sphinx, PEP257)
+- Adds mypy-compatible type hints
+- Batch processes entire modules or directories
+- Validates type hints with mypy
+
+**Usage:**
+```bash
+# Add docstrings and types (NumPy style by default)
+./doctype.py add file.py
+
+# Use Google-style docstrings
+./doctype.py add src/ --style google
+
+# Check documentation coverage
+./doctype.py check . --verbose
+
+# Add only type hints
+./doctype.py fix-types file.py
+
+# Validate types with mypy
+./doctype.py validate src/
+
+# Show configuration and style examples
+./doctype.py config
+```
+
 ## 🔧 Prerequisites
 
 ### Install uv
