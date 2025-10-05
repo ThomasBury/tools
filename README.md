@@ -13,6 +13,7 @@ A collection of lightweight, self-contained Python scripts that act as intellige
 ## 📦 What are Micro-Agents?
 
 Micro-agents are standalone Python scripts that:
+
 1. Use shebang with `uv` for zero-setup execution
 2. Declare dependencies inline using PEP 723 metadata
 3. Focus on a single, well-defined task
@@ -53,15 +54,18 @@ if __name__ == "__main__":
 ## 🛠️ Available Micro-Agents
 
 ### 1. `pr_review.py` - GitHub PR Review Agent
+
 AI-powered pull request reviewer that integrates with GitHub CLI.
 
 **Features:**
+
 - Fetches PR diffs using `gh` CLI
 - Provides focused reviews (security, performance, testing, etc.)
 - Posts reviews back to GitHub
 - Supports multiple AI models
 
 **Usage:**
+
 ```bash
 # Review a PR in the current repo
 ./pr_review.py review 123
@@ -77,9 +81,11 @@ AI-powered pull request reviewer that integrates with GitHub CLI.
 ```
 
 ### 2. `dev_assist.py` - Development Assistant
+
 Comprehensive development workflow automation tool.
 
 **Features:**
+
 - Project initialization with `uv`
 - Dependency management
 - Conventional commits helper
@@ -87,6 +93,7 @@ Comprehensive development workflow automation tool.
 - Code quality fixes
 
 **Usage:**
+
 ```bash
 # Create new project
 ./dev_assist.py init my-project --python 3.11
@@ -105,9 +112,11 @@ Comprehensive development workflow automation tool.
 ```
 
 ### 3. `code_review.py` - Lightweight Code Reviewer
+
 Quick AI-powered code reviews without external dependencies.
 
 **Features:**
+
 - Reviews single files or entire directories
 - Respects `.gitignore` patterns
 - Multiple focus areas (security, performance, style)
@@ -115,6 +124,7 @@ Quick AI-powered code reviews without external dependencies.
 - Project context awareness
 
 **Usage:**
+
 ```bash
 # Review a single file
 ./code_review.py review app.py
@@ -130,9 +140,11 @@ Quick AI-powered code reviews without external dependencies.
 ```
 
 ### 4. `lintfix.py` - Python Quality Gate
+
 Fast, comprehensive code quality checker and fixer.
 
 **Features:**
+
 - Formats with Ruff
 - Lints and auto-fixes issues
 - Type-checks with mypy
@@ -140,6 +152,7 @@ Fast, comprehensive code quality checker and fixer.
 - Audits dependencies
 
 **Usage:**
+
 ```bash
 # Run all checks
 ./lintfix.py all
@@ -154,19 +167,12 @@ Fast, comprehensive code quality checker and fixer.
 ./lintfix.py test
 ```
 
-### 5. `weather.py` - Simple Weather CLI
-Minimalist weather fetcher (example of a simple micro-agent).
+### 5. `mdtodo.py` - TODO Scanner
 
-**Usage:**
-```bash
-./weather.py Berlin
-./weather.py "New York"
-```
-
-### 6. `mdtodo.py` - TODO Scanner
 Scans repositories for TODO comments and task files.
 
 **Usage:**
+
 ```bash
 # Scan for TODO comments
 ./mdtodo.py todo
@@ -175,10 +181,12 @@ Scans repositories for TODO comments and task files.
 ./mdtodo.py tasks --file tasks.yaml
 ```
 
-### 7. `daily_flow.py` - MCP-Powered Daily Workflow Agent 🌟
+### 6. `daily_flow.py` - MCP-Powered Daily Workflow Agent 🌟
+
 Comprehensive daily workflow automation using Model Context Protocol.
 
 **Features:**
+
 - **MCP Integration**: Connects to multiple data sources via MCP servers
 - **Unified View**: Aggregates data from filesystem, git, GitHub, calendar
 - **Intelligent Reports**: AI-powered insights and recommendations
@@ -187,12 +195,14 @@ Comprehensive daily workflow automation using Model Context Protocol.
 - **Multiple Formats**: Export as markdown, JSON, or terminal display
 
 **MCP Servers Used:**
+
 - Filesystem MCP - For notes and documents
 - Git MCP - For repository activity
 - GitHub MCP - For PRs and issues
 - Extensible to Slack, Calendar, Obsidian, etc.
 
 **Usage:**
+
 ```bash
 # Generate daily standup
 ./daily_flow.py standup
@@ -214,6 +224,7 @@ Comprehensive daily workflow automation using Model Context Protocol.
 ```
 
 **Setup MCP Servers:**
+
 ```bash
 # Install MCP servers (one-time)
 npm install -g @modelcontextprotocol/server-filesystem
@@ -223,10 +234,12 @@ npm install -g @modelcontextprotocol/server-git
 export GITHUB_TOKEN="your-github-token"
 ```
 
-### 8. `doctype.py` - Docstring and Type Hint Generator
+### 7. `doctype.py` - Docstring and Type Hint Generator
+
 Automatically adds comprehensive docstrings and type hints to Python code.
 
 **Features:**
+
 - Analyzes code to understand function signatures and logic
 - Generates docstrings in multiple styles (NumPy, Google, Sphinx, PEP257)
 - Adds mypy-compatible type hints
@@ -234,6 +247,7 @@ Automatically adds comprehensive docstrings and type hints to Python code.
 - Validates type hints with mypy
 
 **Usage:**
+
 ```bash
 # Add docstrings and types (NumPy style by default)
 ./doctype.py add file.py
@@ -257,6 +271,7 @@ Automatically adds comprehensive docstrings and type hints to Python code.
 ## 🔧 Prerequisites
 
 ### Install uv
+
 The only requirement is `uv`, a fast Python package and project manager:
 
 ```bash
@@ -268,6 +283,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 ```
 
 ### Install GitHub CLI (for pr_review.py)
+
 ```bash
 # macOS
 brew install gh
@@ -283,6 +299,7 @@ gh auth login
 ```
 
 ### Configure AI Models
+
 Most agents use LLM libraries. Install and configure your preferred model:
 
 ```bash
@@ -300,29 +317,35 @@ export OPENAI_API_KEY="your-api-key"
 ## 💡 Best Practices for Creating Micro-Agents
 
 ### 1. Keep It Focused
+
 Each micro-agent should do one thing well. If it's getting complex, split it.
 
 ### 2. Use Modern Python Features
+
 - Type hints for clarity
 - Dataclasses for data structures
 - Async/await where appropriate
 - Pattern matching (Python 3.10+)
 
 ### 3. Provide Great UX
+
 - Use `typer` for CLI with automatic help
 - Use `rich` for beautiful output
 - Show progress for long operations
 - Provide clear error messages
 
 ### 4. Make It Executable
+
 ```bash
 chmod +x my_agent.py
 ```
 
 ### 5. Document Inline
+
 Use clear docstrings and inline comments. The script should be self-documenting.
 
 ### 6. Handle Errors Gracefully
+
 ```python
 try:
     result = risky_operation()
@@ -380,6 +403,7 @@ if __name__ == "__main__":
 ```
 
 Make it executable and run:
+
 ```bash
 chmod +x my_agent.py
 ./my_agent.py hello --excited Alice
@@ -411,22 +435,26 @@ These micro-agents are provided as examples and templates. Feel free to use, mod
 ## 🚦 Quick Start
 
 1. Install uv:
+
    ```bash
    curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
 2. Clone this repository:
+
    ```bash
    git clone <repository-url>
    cd tools
    ```
 
 3. Make scripts executable:
+
    ```bash
    chmod +x *.py
    ```
 
 4. Run any micro-agent:
+
    ```bash
    ./dev_assist.py init my-awesome-project
    ./code_review.py review .
@@ -445,6 +473,7 @@ Traditional development tools often require complex installation, configuration,
 - **AI-Enhanced**: Leverage LLMs for intelligent assistance
 
 This approach is perfect for:
+
 - Quick automation tasks
 - CI/CD pipelines
 - Development utilities
