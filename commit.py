@@ -44,6 +44,8 @@ DEFAULT_MODEL = os.environ.get("COMMIT_MODEL", "gemini-2.5-flash-lite")
 class CommitWorkflowApp(App[str | None]):
     """Textual-powered commit assistant with diff viewer and editor."""
 
+    TITLE = "Commit Assistant"
+
     CSS = """
     Screen {
         layout: vertical;
@@ -58,7 +60,6 @@ class CommitWorkflowApp(App[str | None]):
     #layout {
         height: 1fr;
         margin: 1;
-        gap: 1;
     }
 
     #info-panel {
@@ -66,8 +67,7 @@ class CommitWorkflowApp(App[str | None]):
         width: 2fr;
         padding: 1;
         background: $surface;
-        border: tall $surface-dim;
-        gap: 1;
+        border: tall $primary;
     }
 
     #editor-panel {
@@ -76,7 +76,6 @@ class CommitWorkflowApp(App[str | None]):
         padding: 1;
         background: $surface;
         border: tall $accent;
-        gap: 1;
     }
 
     TextArea#diff-view {
@@ -126,7 +125,7 @@ class CommitWorkflowApp(App[str | None]):
         self._regenerate = regenerate_message
 
     def compose(self) -> ComposeResult:
-        yield Header("Commit Assistant", show_clock=False)
+        yield Header(show_clock=False)
         with Horizontal(id="layout"):
             with Vertical(id="info-panel"):
                 yield Static(
