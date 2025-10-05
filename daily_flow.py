@@ -8,6 +8,7 @@
 #   "httpx>=0.27",
 #   "pydantic>=2.0",
 #   "llm>=0.26",
+#   "llm-gemini>=0.24",
 #   "python-dateutil>=2.8",
 #   "aiofiles>=23.0",
 # ]
@@ -64,7 +65,7 @@ app = typer.Typer(no_args_is_help=True, add_completion=False)
 console = Console()
 
 # Configuration
-DEFAULT_MODEL = os.environ.get("DAILY_FLOW_MODEL", "gemini-2.5-flash")
+DEFAULT_MODEL = os.environ.get("DAILY_FLOW_MODEL", "gemini-2.5-flash-lite")
 DEFAULT_WORKSPACE = Path.home() / "workspace"
 DEFAULT_NOTES_DIR = Path.home() / "notes"
 
