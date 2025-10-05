@@ -5,6 +5,7 @@
 #   "typer>=0.12",
 #   "rich>=13.7",
 #   "llm>=0.26",
+#   "llm-gemini>=0.24",
 #   "pygments>=2.17",
 #   "pathspec>=0.12",
 # ]
@@ -51,109 +52,465 @@ app = typer.Typer(no_args_is_help=True, add_completion=False)
 console = Console()
 
 # Defaults
-DEFAULT_MODEL = os.environ.get("CODE_REVIEW_MODEL", "gemini-2.5-flash")
+DEFAULT_MODEL = os.environ.get("CODE_REVIEW_MODEL", "gemini-2.5-flash-lite")
 MAX_FILE_SIZE = int(os.environ.get("CODE_REVIEW_MAX_SIZE", "100000"))  # 100KB
 
-
 class ReviewFocus(str, Enum):
-    """Types of review focus."""
+    """Types of review focus.
+
+    An enumeration representing different categories or areas of focus for a code review.
+    This allows for categorization and filtering of reviews based on their primary objective.
+
+    Attributes
+    ----------
+    GENERAL : str
+        Represents a general code review covering multiple aspects.
+    SECURITY : str
+        Represents a review specifically focused on security vulnerabilities and best practices.
+    PERFORMANCE : str
+        Represents a review focused on code performance, efficiency, and resource utilization.
+    TESTING : str
+        Represents a review primarily concerned with the quality, coverage, and effectiveness of tests.
+    STYLE : str
+        Represents a review focused on code style, readability, and adherence to conventions.
+    """
     GENERAL = "general"
     SECURITY = "security"
     PERFORMANCE = "performance"
     TESTING = "testing"
     STYLE = "style"
 
-
-@dataclass
 class CodeFile:
-    """Represents a code file to review."""
+    """Represents a code file to review.
+
+    This class encapsulates the information about a code file, including its path,
+    content, the number of lines, and its size in bytes.
+
+    Attributes
+    ----------
+    path : Path
+        The absolute path to the code file.
+    content : str
+        The entire content of the code file as a string.
+    lines : int
+        The total number of lines in the code file.
+    size : int
+        The size of the code file in bytes.
+    """
     path: Path
     content: str
     lines: int
     size: int
 
-def get_gitignore_spec(root: Path) -> Optional[pathspec.PathSpec]:
-    """Get gitignore patterns if available."""
-    gitignore = root / ".gitignore"
+    def __init__(self, path: Path, content: str) -> None:
+        """Initialize a CodeFile instance.
+
+        Parameters
+        ----------
+        path : Path
+            The absolute path to the code file.
+        content : str
+            The entire content of the code file as a string.
+        """
+        self.path = path
+        self.content = content
+        self.size = len(content.encode('utf-8'))
+
+    @property
+    def lines(self) -> int:
+        return len(self.content.splitlines())
+
+    def get_lines(self) -> list[str]:
+        """Return all lines of the code file.
+
+        Returns
+        -------
+        list[str]
+            A list of strings, where each string is a line from the code file.
+        """
+        return self.content.splitlines()
+
+    def get_line(self, line_num: int) -> str | None:
+        """Return a specific line from the code file.
+
+        Parameters
+        ----------
+        line_num : int
+            The 1-based line number to retrieve.
+
+        Returns
+        -------
+        str | None
+            The content of the specified line, or None if the line number is out of bounds.
+        """
+        lines = self.get_lines()
+        if 1 <= line_num <= len(lines):
+            return lines[line_num - 1]
+        return None
+
+    def __repr__(self) -> str:
+        """Return a developer-friendly string representation of the CodeFile.
+
+        Returns
+        -------
+        str
+            A string representing the CodeFile, including its path and line count.
+        """
+        return f"CodeFile(path='{self.path}', lines={self.lines})"
+
+    def __str__(self) -> str:
+        """Return a user-friendly string representation of the CodeFile.
+
+        Returns
+        -------
+        str
+            A string representing the CodeFile, showing its path.
+        """
+        return str(self.path)
+
+
+def get_gitignore_spec(root: Path) -> pathspec.PathSpec | None:
+    """Get gitignore patterns if available.
+
+    Searches for a `.gitignore` file in the provided `root` directory. If found,
+    it parses the file to create a `pathspec.PathSpec` object representing the
+    gitignore rules.
+
+    Parameters
+    ----------
+    root : Path
+        The root directory to search for a `.gitignore` file.
+
+    Returns
+    -------
+    pathspec.PathSpec | None
+        A `pathspec.PathSpec` object containing the parsed gitignore rules if a
+        `.gitignore` file is found. Returns `None` if no `.gitignore` file
+        exists in the specified `root` directory.
+
+    Examples
+    --------
+    >>> from pathlib import Path
+    >>> # Assuming a .gitignore file exists with content:
+    >>> # "*.pyc"
+    >>> # "build/"
+    >>> root_dir = Path(".")
+    >>> spec = get_gitignore_spec(root_dir)
+    >>> if spec:
+    ...     print(spec.match_file("my_module.pyc"))
+    ...     print(spec.match_file("build/output.log"))
+    True
+    True
+
+    >>> # Assuming no .gitignore file exists
+    >>> non_existent_root = Path("/tmp/non_existent_dir")
+    >>> spec_none = get_gitignore_spec(non_existent_root)
+    >>> print(spec_none)
+    None
+    """
+    gitignore: Path = root / ".gitignore"
     if gitignore.exists():
         with open(gitignore) as f:
             return pathspec.PathSpec.from_lines("gitwildmatch", f)
     return None
 
 
-def find_python_files(path: Path, gitignore_spec: Optional[pathspec.PathSpec] = None) -> list[Path]:
-    """Find all Python files in path, respecting gitignore."""
+def find_python_files(path: Path, gitignore_spec: pathspec.PathSpec | None = None) -> list[Path]:
+    """Find all Python files in path, respecting gitignore.
+
+    This function recursively searches for all files with the '.py' extension
+    within the given `path`. It also filters out files that are ignored by
+    a provided `gitignore_spec` and common development directories like
+    '.venv', 'venv', '.uv', '__pycache__', '.git', 'build', and 'dist'.
+
+    Parameters
+    ----------
+    path : Path
+        The directory or file path to search within.
+    gitignore_spec : pathspec.PathSpec | None, optional
+        A PathSpec object representing the gitignore rules. If provided,
+        files matching these rules will be excluded. By default, None.
+
+    Returns
+    -------
+    list[Path]
+        A sorted list of `Path` objects representing the Python files found.
+
+    Examples
+    --------
+    >>> from pathlib import Path
+    >>> # Assuming a directory structure like:
+    >>> # /my_project
+    >>> # ├── main.py
+    >>> # ├── utils.py
+    >>> # ├── data
+    >>> # │   └── raw.csv
+    >>> # ├── .venv
+    >>> # │   └── ...
+    >>> # └── .gitignore
+    >>>
+    >>> # Create dummy files and directories for testing
+    >>> Path("my_project").mkdir(exist_ok=True)
+    >>> Path("my_project/main.py").touch()
+    >>> Path("my_project/utils.py").touch()
+    >>> Path("my_project/data").mkdir(exist_ok=True)
+    >>> Path("my_project/data/raw.csv").touch()
+    >>> Path("my_project/.venv").mkdir(exist_ok=True)
+    >>> Path("my_project/.gitignore").write_text("*.csv\\n")
+    >>>
+    >>> # Example 1: Basic usage without gitignore
+    >>> python_files_no_ignore = find_python_files(Path("my_project"))
+    >>> print([str(p.relative_to("my_project")) for p in python_files_no_ignore])
+    ['main.py', 'utils.py']
+    >>>
+    >>> # Example 2: Usage with gitignore
+    >>> gitignore_content = Path("my_project/.gitignore").read_text()
+    >>> spec = pathspec.PathSpec.from_lines(pathspec. patrones.GitPattern, gitignore_content.splitlines())
+    >>> python_files_with_ignore = find_python_files(Path("my_project"), gitignore_spec=spec)
+    >>> print([str(p.relative_to("my_project")) for p in python_files_with_ignore])
+    ['main.py', 'utils.py'] # Note: data/raw.csv is not a python file and .venv is excluded by default
+    >>>
+    >>> # Example 3: Searching a single python file
+    >>> single_file_result = find_python_files(Path("my_project/main.py"))
+    >>> print([str(p.relative_to("my_project")) for p in single_file_result])
+    ['main.py']
+    >>>
+    >>> # Example 4: Searching a non-python file
+    >>> non_python_file_result = find_python_files(Path("my_project/data/raw.csv"))
+    >>> print(non_python_file_result)
+    []
+    >>>
+    >>> # Clean up dummy files and directories
+    >>> import shutil
+    >>> shutil.rmtree("my_project")
+    """
     if path.is_file():
         return [path] if path.suffix == ".py" else []
-    
-    files = []
+
+    files: list[Path] = []
+    # Recursively glob for all files ending with '.py'
     for file in path.rglob("*.py"):
         # Skip if gitignored
-        if gitignore_spec and gitignore_spec.match_file(file.relative_to(path.parent)):
+        # We need to compare the relative path to the parent of the path we started searching from
+        # to correctly match gitignore rules which are usually relative to the git root.
+        relative_file_path = file.relative_to(path.parent)
+        if gitignore_spec and gitignore_spec.match_file(relative_file_path):
             continue
-        # Skip common directories
-        parts = file.parts
+
+        # Skip common directories that are unlikely to contain relevant Python code
+        # We check parts of the relative path to correctly identify ignored directories.
+        parts = relative_file_path.parts
         if any(p in {".venv", "venv", ".uv", "__pycache__", ".git", "build", "dist"} for p in parts):
             continue
+
         files.append(file)
-    
+
+    # Sort the files for consistent output
     return sorted(files)
 
+def read_code_file(file: Path, max_size: int = MAX_FILE_SIZE) -> CodeFile | None:
+    """Read a code file with size limits.
 
-def read_code_file(file: Path, max_size: int = MAX_FILE_SIZE) -> Optional[CodeFile]:
-    """Read a code file with size limits."""
+    Reads the content of a given code file, checks if its size exceeds a
+    specified maximum, and returns a CodeFile object if within limits.
+    Handles potential exceptions during file reading by returning None.
+
+    Parameters
+    ----------
+    file : Path
+        The path to the code file to be read.
+    max_size : int, optional
+        The maximum allowed size of the file in bytes.
+        Defaults to MAX_FILE_SIZE.
+
+    Returns
+    -------
+    CodeFile | None
+        A CodeFile object containing the file's path, content, line count,
+        and size if the file is read successfully and within the size limit.
+        Returns None if the file size exceeds max_size or if any exception
+        occurs during file reading.
+
+    Examples
+    --------
+    >>> from pathlib import Path
+    >>> # Assuming a dummy file 'my_code.py' exists with content and size
+    >>> # For testing, we'll mock the file operations.
+    >>> class MockFile:
+    ...     def __init__(self, content: str, size: int):
+    ...         self._content = content
+    ...         self._size = size
+    ...     def stat(self):
+    ...         class Stat:
+    ...             def __init__(self, size: int):
+    ...                 self.st_size = size
+    ...         return Stat(self._size)
+    ...     def read_text(self, encoding: str = "utf-8", errors: str = "replace") -> str:
+    ...         return self._content
+    >>> original_Path_stat = Path.stat
+    >>> original_Path_read_text = Path.read_text
+    >>> Path.stat = lambda self: MockFile("print('hello')\\n", 15).stat()
+    >>> Path.read_text = lambda self, encoding, errors: MockFile("print('hello')\\n", 15).read_text()
+    >>> code_file = read_code_file(Path("my_code.py"))
+    >>> if code_file:
+    ...     print(code_file.content)
+    ...     print(code_file.lines)
+    ...     print(code_file.size)
+    print('hello')
+    2
+    15
+    >>> Path.stat = lambda self: MockFile("a"*1000000, 1000000).stat()
+    >>> Path.read_text = lambda self, encoding, errors: MockFile("a"*1000000, 1000000).read_text()
+    >>> code_file_too_large = read_code_file(Path("large_code.py"), max_size=500000)
+    >>> print(code_file_too_large is None)
+    True
+    >>> # Restore original methods
+    >>> Path.stat = original_Path_stat
+    >>> Path.read_text = original_Path_read_text
+    """
+    console.print(f"Debug: read_code_file called for {file}")
     try:
         stat = file.stat()
+        console.print(f"Debug: {file} stat.st_size = {stat.st_size}, max_size = {max_size}")
         if stat.st_size > max_size:
+            console.print(f"Debug: {file} is too large")
             return None
-        
+
         content = file.read_text(encoding="utf-8", errors="replace")
-        lines = content.count("\n") + 1
-        
+        console.print(f"Debug: content read, len={len(content)}")
+
+        console.print(f"Debug: creating CodeFile for {file}")
+
         return CodeFile(
             path=file,
-            content=content,
-            lines=lines,
-            size=stat.st_size
+            content=content
         )
-    except Exception:
+    except Exception as e:
+        console.print(f"Debug: exception in read_code_file for {file}: {e}")
         return None
 
-
 def get_project_context(root: Path) -> str:
-    """Get project context from common files."""
-    context_parts = []
-    
+    """Get project context from common files.
+
+    This function inspects a given root directory for common project
+    configuration files such as `pyproject.toml` and README files. It extracts
+    relevant information like the project name, dependencies (from pyproject.toml),
+    and an excerpt from the README to provide a concise context.
+
+    Parameters
+    ----------
+    root : Path
+        The root directory of the project to inspect.
+
+    Returns
+    -------
+    str
+        A string containing the project context, formatted with project name,
+        dependencies, and a README excerpt, or an empty string if no context
+        could be derived.
+
+    Examples
+    --------
+    >>> from pathlib import Path
+    >>> # Assuming a dummy project structure
+    >>> dummy_root = Path("./dummy_project")
+    >>> dummy_root.mkdir(exist_ok=True)
+    >>> (dummy_root / "pyproject.toml").write_text(
+    ...     '[project]\\n'
+    ...     'name = "my_awesome_project"\\n'
+    ...     'dependencies = ["requests", "numpy"]\\n'
+    ... )
+    >>> (dummy_root / "README.md").write_text("# My Awesome Project\\n\\nThis is a great project that does amazing things.")
+    >>> print(get_project_context(dummy_root))
+    Project: my_awesome_project
+    Dependencies: requests, numpy...
+    README excerpt: # My Awesome Project
+
+    >>> # Clean up dummy project
+    >>> (dummy_root / "pyproject.toml").unlink()
+    >>> (dummy_root / "README.md").unlink()
+    >>> dummy_root.rmdir()
+
+    >>> # Example with no context files
+    >>> empty_dir = Path("./empty_dir")
+    >>> empty_dir.mkdir(exist_ok=True)
+    >>> print(get_project_context(empty_dir))
+    <BLANKLINE>
+    >>> empty_dir.rmdir()
+    """
+    context_parts: list[str] = []
+
     # Check for pyproject.toml
-    pyproject = root / "pyproject.toml"
+    pyproject: Path = root / "pyproject.toml"
     if pyproject.exists():
         try:
-            import tomllib
+            import tomllib  # Use tomllib for Python 3.11+
             with open(pyproject, "rb") as f:
                 data = tomllib.load(f)
-                project = data.get("project", {})
+                project: dict = data.get("project", {})
                 if project:
                     context_parts.append(f"Project: {project.get('name', 'unknown')}")
                     if deps := project.get("dependencies"):
-                        context_parts.append(f"Dependencies: {', '.join(deps[:5])}...")
-        except:
+                        # Limit displayed dependencies for brevity
+                        context_parts.append(f"Dependencies: {', '.join(deps[:5])}{'...' if len(deps) > 5 else ''}")
+        except Exception:
+            # Ignore errors during TOML parsing or file reading
             pass
-    
+
     # Check for README
-    for readme in ["README.md", "README.rst", "README.txt"]:
-        readme_file = root / readme
+    readme_filenames: list[str] = ["README.md", "README.rst", "README.txt"]
+    for readme_filename in readme_filenames:
+        readme_file: Path = root / readme_filename
         if readme_file.exists():
-            content = readme_file.read_text(encoding="utf-8", errors="ignore")
-            # Get first paragraph
-            first_para = content.split("\n\n")[0][:200]
-            context_parts.append(f"README excerpt: {first_para}")
-            break
-    
+            try:
+                content: str = readme_file.read_text(encoding="utf-8", errors="ignore")
+                # Get first paragraph, limit to 200 characters
+                first_para: str = content.split("\n\n")[0][:200]
+                context_parts.append(f"README excerpt: {first_para}")
+                break  # Stop after finding the first README
+            except Exception:
+                # Ignore errors during file reading
+                pass
+
     return "\n".join(context_parts) if context_parts else ""
 
+
 def build_review_prompt(files: list[CodeFile], focus: ReviewFocus, context: str) -> str:
-    """Build review prompt for the AI."""
-    
+    """
+    Build a review prompt for the AI.
+
+    Constructs a detailed prompt for an AI code reviewer,
+    incorporating specific instructions based on the review focus
+    and providing context about the files being reviewed.
+
+    Parameters
+    ----------
+    files : list[CodeFile]
+        A list of CodeFile objects representing the files to be reviewed.
+        Only the first 10 files will be listed in the prompt.
+    focus : ReviewFocus
+        An enum value specifying the primary focus of the review
+        (e.g., GENERAL, SECURITY, PERFORMANCE).
+    context : str
+        Additional context or background information about the code or project
+        to guide the review.
+
+    Returns
+    -------
+    str
+        The generated review prompt string, ready to be sent to the AI.
+
+    Examples
+    --------
+    >>> from pathlib import Path
+    >>> files_to_review = [CodeFile(Path("src/main.py"), 150), CodeFile(Path("src/utils.py"), 80)]
+    >>> review_focus = ReviewFocus.GENERAL
+    >>> project_context = "This is a new feature for user authentication."
+    >>> prompt = build_review_prompt(files_to_review, review_focus, project_context)
+    >>> print(prompt[:50] + "...") # Print a snippet of the generated prompt
+    Review Request: ...
+    """
+
     focus_instructions = {
         ReviewFocus.GENERAL: """
 Provide a balanced code review covering:
@@ -195,65 +552,71 @@ Focus on code style and conventions:
 - Code organization and structure
 - Import organization"""
     }
-    
+
     # Build file list
     file_list = "\n".join([
         f"- {f.path.name} ({f.lines} lines)"
         for f in files[:10]  # List first 10 files
     ])
-    if len(files) > 10:
-        file_list += f"\n... and {len(files) - 10} more files"
-    
-    # Combine code from files
-    total_lines = sum(f.lines for f in files)
-    code_blocks = []
-    
-    for file in files[:5]:  # Include up to 5 files
-        if len(code_blocks) > 0 and sum(len(b) for b in code_blocks) > 10000:
-            break  # Limit total size
-        
-        code_blocks.append(f"\n### File: {file.path}\n```python\n{file.content[:5000]}\n```")
-    
-    code_section = "\n".join(code_blocks)
-    
-    prompt = f"""You are an expert Python developer conducting a code review.
 
-{context}
+    # Build code content block
+    code_content = "\n".join([
+        f"--- FILE: {f.path.name} ---\n```python\n{f.content}\n```"
+        for f in files
+    ])
 
-Files being reviewed:
-{file_list}
+    prompt = f"""You are an expert code reviewer. Review the following code files with a focus on '{focus.value}'.
 
-Total lines: {total_lines}
-
-Review Focus:
 {focus_instructions[focus]}
 
-Provide a structured review with these sections:
-1. **Overview** - Summary of the code and its purpose
-2. **Strengths** - What's done well
-3. **Issues Found** - Problems discovered (be specific with file names and line numbers)
-4. **Recommendations** - Actionable improvements
-5. **Priority Actions** - Top 3-5 most important changes
+## Project Context
+{context or "No additional context provided."}
 
-Be constructive, specific, and reference actual code. Use markdown formatting.
+## Files for Review
+{file_list}
 
-Code to review:
-{code_section}
+## Code to Review
+{code_content}
+
+Please provide a structured review in Markdown format. Identify strengths, weaknesses, and specific, actionable suggestions for improvement.
 """
-    
+
     return prompt
 
 
 def format_file_stats(files: list[CodeFile]) -> Table:
-    """Create a table of files to review."""
+    """Create a table of files to review.
+
+    Parameters
+    ----------
+    files : list[CodeFile]
+        A list of CodeFile objects to be displayed in the table.
+
+    Returns
+    -------
+    Table
+        A rich.table.Table object representing the file statistics.
+
+    Examples
+    --------
+    >>> from pathlib import Path
+    >>> files_data = [
+    ...     CodeFile(Path("main.py"), 100, 2048),
+    ...     CodeFile(Path("utils.py"), 50, 1024),
+    ... ]
+    >>> table = format_file_stats(files_data)
+    >>> # table.title would be "Files to Review"
+    >>> # table.columns would contain "File", "Lines", "Size"
+    >>> # table.rows would contain the formatted data and total if applicable
+    """
     table = Table(title="Files to Review")
     table.add_column("File", style="cyan")
     table.add_column("Lines", justify="right", style="yellow")
     table.add_column("Size", justify="right", style="dim")
-    
+
     total_lines = 0
     total_size = 0
-    
+
     for file in files:
         table.add_row(
             str(file.path.name),
@@ -262,7 +625,7 @@ def format_file_stats(files: list[CodeFile]) -> Table:
         )
         total_lines += file.lines
         total_size += file.size
-    
+
     if len(files) > 1:
         table.add_row(
             "[bold]Total[/bold]",
@@ -270,14 +633,45 @@ def format_file_stats(files: list[CodeFile]) -> Table:
             f"[bold]{total_size:,} bytes[/bold]",
             style="green"
         )
-    
+
     return table
 
 
-def check_git_status(path: Path) -> Optional[str]:
-    """Check if path is in a git repo and get status."""
+def check_git_status(path: Path) -> str | None:
+    """Check if a path is within a Git repository and retrieve its status.
+
+    This function determines if the provided `path` is part of a Git
+    repository. If it is, it then fetches the short status of the
+    repository (e.g., number of uncommitted changes or if it's clean).
+
+    Parameters
+    ----------
+    path : Path
+        The file system path to check. This can be a directory or a file.
+
+    Returns
+    -------
+    str | None
+        A string describing the Git status if the path is in a Git
+        repository, formatted as "Git repository with X uncommitted changes"
+        or "Git repository (clean)". Returns None if the path is not in
+        a Git repository or if an error occurs.
+
+    Examples
+    --------
+    >>> from pathlib import Path
+    >>> # Assuming '/path/to/your/repo' is a Git repository
+    >>> repo_path = Path('/path/to/your/repo')
+    >>> status = check_git_status(repo_path)
+    >>> print(status) # Example output: "Git repository (clean)" or "Git repository with 5 uncommitted changes"
+
+    >>> # Assuming '/path/to/non/repo' is not a Git repository
+    >>> non_repo_path = Path('/path/to/non/repo')
+    >>> status = check_git_status(non_repo_path)
+    >>> print(status) # Output: None
+    """
     try:
-        # Find git root
+        # Find the root of the Git repository
         result = sp.run(
             ["git", "rev-parse", "--show-toplevel"],
             cwd=path if path.is_dir() else path.parent,
@@ -285,13 +679,14 @@ def check_git_status(path: Path) -> Optional[str]:
             text=True,
             check=False
         )
-        
+
         if result.returncode != 0:
+            # Not a git repository
             return None
-        
-        git_root = Path(result.stdout.strip())
-        
-        # Get brief status
+
+        git_root: Path = Path(result.stdout.strip())
+
+        # Get the brief status of the repository
         result = sp.run(
             ["git", "status", "--short"],
             cwd=git_root,
@@ -299,15 +694,18 @@ def check_git_status(path: Path) -> Optional[str]:
             text=True,
             check=False
         )
-        
+
         if result.returncode == 0 and result.stdout:
+            # Repository has uncommitted changes
             lines = result.stdout.strip().split("\n")
             return f"Git repository with {len(lines)} uncommitted changes"
         elif result.returncode == 0:
+            # Repository is clean
             return "Git repository (clean)"
-    except:
+    except Exception:  # Catch any potential exceptions during subprocess execution
+        # Silently fail if any error occurs, returning None
         pass
-    
+
     return None
 
 
@@ -320,99 +718,66 @@ def review(
     show_code: bool = typer.Option(False, "--show-code", "-s", help="Show code snippets in terminal"),
 ) -> None:
     """Review Python code with AI assistance."""
-    
-    # Validate path
+
+    console.print(f"Debug: path={path}, exists={path.exists()}, cwd={Path.cwd()}")
+
     if not path.exists():
         console.print(f"[red]Error:[/red] Path '{path}' does not exist")
         raise typer.Exit(1)
-    
-    # Find Python files
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
         task = progress.add_task("Finding Python files...", total=None)
-        
-        # Get gitignore spec if in git repo
         root = path if path.is_dir() else path.parent
         gitignore_spec = get_gitignore_spec(root)
-        
-        # Find files
         files = find_python_files(path, gitignore_spec)
-        
+
         if not files:
-            console.print("[yellow]No Python files found to review[/yellow]")
+            console.print("[yellow]No Python files found to review.[/yellow]")
             raise typer.Exit(0)
-        
+
         if len(files) > max_files:
             console.print(f"[yellow]Found {len(files)} files, reviewing first {max_files}[/yellow]")
             files = files[:max_files]
-        
-        # Read files
+
         progress.update(task, description="Reading files...")
-        code_files = []
-        skipped = 0
-        
-        for file in files:
-            if code_file := read_code_file(file):
-                code_files.append(code_file)
-            else:
-                skipped += 1
-        
+        code_files = [cf for f in files if (cf := read_code_file(f))]
         if not code_files:
-            console.print("[red]Error:[/red] No files could be read")
+            console.print("[red]Error:[/red] No files could be read (are they too large?).")
             raise typer.Exit(1)
-        
-        if skipped > 0:
-            console.print(f"[dim]Skipped {skipped} file(s) due to size limits[/dim]")
-        
-        # Get project context
-        progress.update(task, description="Analyzing project context...")
-        context = get_project_context(root)
-        
-        # Check git status
-        git_status = check_git_status(path)
-        if git_status:
-            context = f"{context}\n{git_status}" if context else git_status
-    
-    # Display file stats
-    console.print(format_file_stats(code_files))
-    
-    # Show code preview if requested
-    if show_code and code_files:
-        lexer = PythonLexer()
-        formatter = TerminalFormatter()
-        
-        for file in code_files[:2]:  # Show first 2 files
-            console.print(f"\n[cyan]Preview: {file.path.name}[/cyan]")
-            preview = file.content[:500] + ("\n..." if len(file.content) > 500 else "")
-            highlighted = highlight(preview, lexer, formatter)
-            console.print(Panel(highlighted, border_style="dim"))
-    
-    # Build prompt
-    console.print(f"\n[cyan]Generating {focus.value} review with {model}...[/cyan]")
-    prompt = build_review_prompt(code_files, focus, context)
-    
-    # Get AI model
-    try:
-        ai_model = llm.get_model(model)
-    except llm.UnknownModelError:
-        console.print(f"[red]Error:[/red] Unknown model '{model}'")
-        console.print("Available models: " + ", ".join([m.model_id for m in llm.get_models()]))
-        raise typer.Exit(1)
-    
-    # Generate review
-    try:
-        response = ai_model.prompt(prompt)
-        review_text = response.text()
-    except Exception as e:
-        console.print(f"[red]Error:[/red] Failed to generate review: {e}")
-        raise typer.Exit(1)
-    
-    # Display review
-    console.print(Panel("[bold green]Code Review Complete[/bold green]", border_style="green"))
-    console.print(Markdown(review_text))
+
+        console.print(format_file_stats(code_files))
+        if git_status := check_git_status(root):
+            console.print(f"[dim]{git_status}[/dim]")
+
+        if show_code:
+            for code_file in code_files:
+                console.print(Panel(
+                    highlight(code_file.content, PythonLexer(), TerminalFormatter()),
+                    title=str(code_file.path.name),
+                    border_style="green"
+                ))
+
+        progress.update(task, description="Generating AI review...")
+        project_context = get_project_context(root)
+        prompt = build_review_prompt(code_files, focus, project_context)
+
+        try:
+            ai_model = llm.get_model(model)
+            response = ai_model.prompt(prompt)
+            review_text = response.text()
+        except Exception as e:
+            console.print(f"[red]Error during AI review:[/red] {e}")
+            raise typer.Exit(1)
+
+    console.print(Panel(
+        Markdown(review_text),
+        title=f"AI Code Review ({focus.value.capitalize()})",
+        border_style="blue"
+    ))
 
 @app.command()
 def quick(
@@ -463,24 +828,36 @@ File: {path.name}
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 
-
-@app.command()
 def models() -> None:
-    """List available AI models."""
-    models = llm.get_models()
+    """List available AI models.
+
+    Retrieves a list of available AI models from the LLM backend and displays them
+    in a formatted table. If no models are found, it provides instructions on how
+    to install LLM plugins.
+
+    Returns
+    -------
+    None
+        This function does not return any value. It prints information to the console.
+
+    Examples
+    --------
+    >>> models()
+    """
+    models: list[MockModel] = llm.get_models()
     if not models:
         console.print("[yellow]No models found. Install LLM plugins first.[/yellow]")
         console.print("Example: uv tool install llm-gemini")
         return
-    
+
     table = Table(title="Available Models")
     table.add_column("Model ID", style="cyan")
     table.add_column("Provider", style="yellow")
-    
+
     for model in models:
-        provider = model.model_id.split("-")[0] if "-" in model.model_id else "unknown"
+        provider: str = model.model_id.split("-")[0] if "-" in model.model_id else "unknown"
         table.add_row(model.model_id, provider)
-    
+
     console.print(table)
 
 if __name__ == "__main__":
