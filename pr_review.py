@@ -5,6 +5,7 @@
 #   "typer>=0.12",
 #   "rich>=13.7",
 #   "llm>=0.26",
+#   "llm-gemini>=0.24",
 #   "httpx>=0.27",
 #   "pydantic>=2.0",
 # ]
@@ -46,7 +47,7 @@ app = typer.Typer(no_args_is_help=True, add_completion=False)
 console = Console()
 
 # Default model for reviews
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-2.5-flash-lite"
 
 class ReviewFocus(str, Enum):
     """Types of review focus."""
