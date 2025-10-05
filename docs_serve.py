@@ -33,7 +33,18 @@ ROOT = Path.cwd()
 def run(cmd: list[str]) -> int:
     """Executes a command, prints it, and returns its exit code."""
     console.print(f"[dim]$ {' '.join(cmd)}[/dim]")
-    return sp.call(cmd)
+    try:
+        completed = sp.run(cmd, check=False)
+    except FileNotFoundError:
+        console.print(
+            "[bold red]Command not found.[/bold red] "
+            "Ensure dependencies like mkdocs are installed."
+        )
+        return 127
+    except OSError as exc:
+        console.print(f"[bold red]Failed to execute command: {exc}[/bold red]")
+        return 1
+    return completed.returncode
 
 def guess_pkg_name() -> str | None:
     """Tries to guess the package name from pyproject.toml or src/ layout."""
@@ -42,11 +53,22 @@ def guess_pkg_name() -> str | None:
     if pyproject_path.exists():
         try:
             data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
-            name = (data.get("project") or {}).get("name")
-            if name:
-                return name.replace("-", "_")
         except tomllib.TOMLDecodeError:
             console.print("[yellow]Warning: Could not parse pyproject.toml.[/yellow]")
+        else:
+            project = data.get("project") or {}
+            name = project.get("name")
+            if not name:
+                tool = data.get("tool") or {}
+                poetry = tool.get("poetry") or {}
+                if poetry:
+                    name = poetry.get("name")
+                if not name:
+                    hatch = tool.get("hatch") or {}
+                    metadata = hatch.get("metadata") or {}
+                    name = metadata.get("name")
+            if name:
+                return name.replace("-", "_")
 
     # Fallback to src/ layout
     src_dir = ROOT / "src"
@@ -62,9 +84,9 @@ def guess_pkg_name() -> str | None:
 
     return None
 
-def ensure_scaffold():
+def ensure_scaffold(explicit_pkg: str | None = None) -> str:
     """Ensures the necessary MkDocs files and directories exist."""
-    pkg_name = guess_pkg_name()
+    pkg_name = explicit_pkg or guess_pkg_name()
     if not pkg_name:
         pkg_name = "your_package"
         console.print(
@@ -112,11 +134,18 @@ nav:
   - API: api.md
 """
         mkdocs_yml.write_text(mkdocs_yml_content.strip() + "\n", encoding="utf-8")
+    return pkg_name
 
 @app.command()
-def build():
+def build(
+    package: str | None = typer.Option(
+        None,
+        "--package",
+        help="Override the detected package/module name.",
+    )
+):
     """Build static docs site into ./site."""
-    ensure_scaffold()
+    ensure_scaffold(package)
     console.print("\n[bold cyan]Building static documentation...[/bold cyan]")
     exit_code = run([sys.executable, "-m", "mkdocs", "build", "--clean"])
     if exit_code == 0:
@@ -126,11 +155,23 @@ def build():
     sys.exit(exit_code)
 
 @app.command(no_args_is_help=False)
-def serve(port: int = typer.Option(8000, "--port", "-p", help="Port to serve documentation on.")):
+def serve(
+    port: int = typer.Option(8000, "--port", "-p", help="Port to serve documentation on."),
+    host: str = typer.Option(
+        "127.0.0.1",
+        "--host",
+        help="Host interface to bind the server.",
+    ),
+    package: str | None = typer.Option(
+        None,
+        "--package",
+        help="Override the detected package/module name.",
+    ),
+):
     """Serve docs with live reload (default: 127.0.0.1:8000)."""
-    ensure_scaffold()
+    ensure_scaffold(package)
     console.print("\n[bold cyan]Starting live-reload server...[/bold cyan]")
-    cmd = [sys.executable, "-m", "mkdocs", "serve", "-a", f"127.0.0.1:{port}"]
+    cmd = [sys.executable, "-m", "mkdocs", "serve", "-a", f"{host}:{port}"]
     exit_code = run(cmd)
     sys.exit(exit_code)
 
