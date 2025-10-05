@@ -85,7 +85,15 @@ def guess_pkg_name() -> str | None:
     return None
 
 def ensure_scaffold(explicit_pkg: str | None = None) -> str:
-    """Ensures the necessary MkDocs files and directories exist."""
+    """
+    Ensures the necessary MkDocs files and directories exist.
+
+    Args:
+        explicit_pkg (str | None): Explicit package name to use. If None, attempts to auto-detect.
+
+    Returns:
+        str: The package name used for scaffolding.
+    """
     pkg_name = explicit_pkg or guess_pkg_name()
     if not pkg_name:
         pkg_name = "your_package"
