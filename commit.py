@@ -1069,16 +1069,15 @@ def split_commit_message(message: str) -> tuple[str, str]:
     >>> title
     'feat: add feature'
     >>> body
-    'This adds a new feature.'
-    """
+def split_commit_message(message: str) -> tuple[str, str]:
+    """Split a full commit message into title and body."""
 
     lines = [line.rstrip() for line in message.strip().splitlines() if line.strip() or line == ""]
     if not lines:
         return "chore: update", ""
-    title = lines[0][:72]
+    title = lines[0][:50]
     body = "\n".join(lines[1:]).strip()
     return title, body
-
 
 def collect_diff_for_paths(paths: list[str], status: RepoStatus) -> str:
     """
