@@ -843,6 +843,15 @@ def apply_commit_plan(plan: list[CommitSuggestion]) -> None:
             )
             continue
 
+        try:
+            subprocess.run(["git", "reset"], check=True)
+        except subprocess.CalledProcessError as exc:
+            console.print(
+                "[red]Failed to reset staging area before applying plan:[/red]\n"
+                f"{exc.stderr or exc.stdout}"
+            )
+            raise typer.Exit(1)
+
         console.print(
             Panel(
                 "\n".join(
@@ -868,7 +877,6 @@ def apply_commit_plan(plan: list[CommitSuggestion]) -> None:
             raise typer.Exit(1)
 
         run_git_commit(suggestion.message)
-
 def run_git_commit(message: str):
     """Runs git commit with the given message."""
     try:
