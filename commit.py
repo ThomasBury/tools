@@ -10,21 +10,44 @@
 # ]
 # ///
 """
-commit.py: A micro-agent to analyze your working tree, draft commit plans, and
-help you land conventional commits.
+A micro-agent to analyze your working tree, draft commit plans, and help you land conventional commits.
 
-Usage:
-    uv run commit.py
+This module provides a command-line tool that inspects the current git repository state,
+generates AI-powered commit messages and plans, and offers an interactive Textual-based UI
+for reviewing and editing commits before applying them.
 
-Environment:
-    COMMIT_MODEL (optional): Override the default LLM model name.
+Parameters
+----------
+None
 
-Interactions:
-    - Presents a Textual interface with repo status, AI-generated commit plans,
-      and a side-by-side commit message editor.
-    - Press Ctrl+A to apply the AI-generated multi-commit plan.
-    - Reassign files between commits and press Ctrl+G to regenerate messages.
-    - Use the built-in editor or press Ctrl+O to hand off editing to your system editor.
+Notes
+-----
+The tool supports conventional commits and uses LLM models to generate meaningful commit messages.
+It can handle staged, unstaged, and untracked files, and allows splitting changes into multiple commits.
+
+Environment Variables
+---------------------
+COMMIT_MODEL : str, optional
+    Override the default LLM model name. Default is 'gemini-2.5-flash-lite'.
+
+Examples
+--------
+Run the commit assistant interactively:
+
+>>> uv run commit.py
+
+Use a specific LLM model:
+
+>>> uv run commit.py --model gpt-4
+
+Commit directly without confirmation:
+
+>>> uv run commit.py --yes
+
+In the interactive UI:
+- Press Ctrl+A to apply the AI-generated multi-commit plan.
+- Reassign files between commits and press Ctrl+G to regenerate messages.
+- Use the built-in editor or press Ctrl+O to hand off editing to your system editor.
 """
 
 import json
@@ -50,7 +73,35 @@ DEFAULT_MODEL = os.environ.get("COMMIT_MODEL", "gemini-2.5-flash-lite")
 
 @dataclass
 class RepoStatus:
-    """Snapshot of repository state relevant to committing."""
+    """
+    Snapshot of repository state relevant to committing.
+
+    This dataclass encapsulates the current state of a git repository,
+    including the branch name and lists of files in different states.
+
+    Attributes
+    ----------
+    branch : str
+        The name of the current git branch.
+    staged : list[str]
+        List of file paths that are staged for commit.
+    unstaged : list[str]
+        List of file paths that have changes but are not staged.
+    untracked : list[str]
+        List of file paths that are not tracked by git.
+    summary : str
+        A short textual summary of the repository status.
+
+    See Also
+    --------
+    has_changes : bool
+        Property that returns True if there are any changes to commit.
+
+    Notes
+    -----
+    This class is used to pass repository information between functions
+    that analyze and generate commit plans.
+    """
 
     branch: str
     staged: list[str]
@@ -60,12 +111,51 @@ class RepoStatus:
 
     @property
     def has_changes(self) -> bool:
+        """
+        Check if the repository has any changes to commit.
+
+        Returns
+        -------
+        bool
+            True if there are staged, unstaged, or untracked files, False otherwise.
+
+        Examples
+        --------
+        >>> status = RepoStatus(branch='main', staged=[], unstaged=['file.txt'], untracked=[], summary='')
+        >>> status.has_changes
+        True
+        """
         return bool(self.staged or self.unstaged or self.untracked)
 
 
 @dataclass
 class CommitSuggestion:
-    """LLM-generated commit suggestion."""
+    """
+    LLM-generated commit suggestion.
+
+    This dataclass represents a single commit suggestion created by an LLM,
+    containing the commit title, optional body, and the file paths that should
+    be included in the commit.
+
+    Attributes
+    ----------
+    title : str
+        The commit title (subject line), following conventional commit format.
+    body : str
+        The commit body providing additional explanation (may be empty).
+    paths : list[str]
+        List of file paths that belong to this commit.
+
+    See Also
+    --------
+    message : str
+        Property that returns the formatted commit message.
+
+    Notes
+    -----
+    Commit suggestions are generated based on repository changes and grouped
+    logically by the LLM to create meaningful commit sequences.
+    """
 
     title: str
     body: str
@@ -73,12 +163,75 @@ class CommitSuggestion:
 
     @property
     def message(self) -> str:
+        """
+        Get the full formatted commit message.
+
+        Returns
+        -------
+        str
+            The complete commit message with title and body separated by a blank line.
+
+        Examples
+        --------
+        >>> suggestion = CommitSuggestion(
+        ...     title='feat: add new feature',
+        ...     body='This adds a new feature to the application.',
+        ...     paths=['src/feature.py']
+        ... )
+        >>> suggestion.message
+        'feat: add new feature\n\nThis adds a new feature to the application.'
+        """
         body = self.body.strip()
         return f"{self.title.strip()}\n\n{body}" if body else self.title.strip()
 
 
 class CommitWorkflowApp(App[Any | None]):
-    """Textual-powered commit assistant with editable commit plans."""
+    """
+    Textual-powered commit assistant with editable commit plans.
+
+    This class extends Textual's App to provide an interactive terminal UI
+    for managing git commits. It displays repository status, allows editing
+    of commit messages and plans, and supports applying multi-commit plans.
+
+    Attributes
+    ----------
+    TITLE : str
+        The application title displayed in the header.
+    CSS : str
+        Inline CSS styles for the UI layout and appearance.
+    BINDINGS : list[dict]
+        List of key bindings for user actions.
+
+    Methods
+    -------
+    __init__(diff_text, initial_message, model_name, regenerate_message, repo_status, commit_plan, allow_manual_commit)
+        Initialize the application with repository data and UI state.
+    compose()
+        Build the UI layout with panels for info, diff, and editor.
+    on_mount()
+        Set initial focus and update views on application start.
+    action_commit()
+        Commit staged changes with the current message.
+    action_regenerate()
+        Regenerate the commit message for the selected suggestion.
+    action_regenerate_plan()
+        Regenerate messages for all suggestions in the plan.
+    action_system_editor()
+        Open the commit message in the system editor.
+    action_apply_plan()
+        Apply the current commit plan by staging and committing.
+    on_list_view_selected(event)
+        Handle selection changes in commit or file lists.
+    on_checkbox_changed(event)
+        Handle file assignment changes via checkboxes.
+    on_text_area_changed(event)
+        Update commit message when editor content changes.
+
+    Notes
+    -----
+    The UI is divided into info panel (status, commit list, files) and editor panel (diff, message).
+    Users can navigate with keyboard shortcuts and mouse interactions.
+    """
 
     TITLE = "Commit Assistant"
 
@@ -535,7 +688,36 @@ class CommitWorkflowApp(App[Any | None]):
         self.status_label.update(f"[{color}]{message}[/{color}]")
 
 def get_staged_diff():
-    """Returns the staged git diff."""
+    """
+    Return the git diff for staged changes.
+
+    This function executes 'git diff --staged' to retrieve the differences
+    between the staging area and the last commit.
+
+    Returns
+    -------
+    str
+        The output of git diff --staged as a string. Returns empty string
+        if no staged changes or if git encounters non-fatal errors.
+
+    Raises
+    ------
+    typer.Exit
+        If git is not found in PATH or if stderr contains error messages.
+
+    Notes
+    -----
+    Non-zero exit codes from git diff are handled gracefully since they
+    typically indicate the presence of changes rather than errors.
+
+    Examples
+    --------
+    >>> diff = get_staged_diff()
+    >>> if diff:
+    ...     print("Staged changes found")
+    ... else:
+    ...     print("No staged changes")
+    """
     try:
         result = subprocess.run(
             ["git", "diff", "--staged"],
@@ -558,7 +740,36 @@ def get_staged_diff():
 
 
 def get_full_diff() -> str:
-    """Return diff between HEAD and working tree (staged + unstaged)."""
+    """
+    Return diff between HEAD and working tree (staged + unstaged).
+
+    This function executes 'git diff HEAD' to get the differences between
+    the last commit and the current working tree, including both staged
+    and unstaged changes.
+
+    Returns
+    -------
+    str
+        The output of git diff HEAD as a string. Returns empty string
+        if no differences or if git encounters errors.
+
+    Raises
+    ------
+    typer.Exit
+        If git is not found in PATH.
+
+    Notes
+    -----
+    This differs from get_staged_diff() as it includes unstaged changes.
+    CalledProcessError is handled by returning stdout to avoid failing
+    on repositories with no commits yet.
+
+    Examples
+    --------
+    >>> diff = get_full_diff()
+    >>> len(diff.splitlines())  # Number of diff lines
+    42
+    """
     try:
         result = subprocess.run(
             ["git", "diff", "HEAD"],
@@ -575,7 +786,36 @@ def get_full_diff() -> str:
 
 
 def get_repo_status() -> RepoStatus:
-    """Gather staged, unstaged, and untracked files for display and planning."""
+    """
+    Gather staged, unstaged, and untracked files for display and planning.
+
+    This function queries the git repository to collect information about
+    the current branch, staged files, unstaged changes, untracked files,
+    and a status summary.
+
+    Returns
+    -------
+    RepoStatus
+        A dataclass containing repository state information.
+
+    Raises
+    ------
+    typer.Exit
+        If git is not found in PATH.
+
+    Notes
+    -----
+    Uses multiple git commands to collect comprehensive repository status.
+    Handles cases where commands might fail gracefully.
+
+    Examples
+    --------
+    >>> status = get_repo_status()
+    >>> print(f"Branch: {status.branch}")
+    Branch: main
+    >>> print(f"Staged files: {len(status.staged)}")
+    Staged files: 2
+    """
 
     def run_git(args: list[str]) -> Optional[str]:
         try:
@@ -616,7 +856,41 @@ def get_repo_status() -> RepoStatus:
 
 
 def generate_commit_message(diff: str, model_name: str) -> str:
-    """Generates a commit message using an LLM."""
+    """
+    Generate a commit message using an LLM.
+
+    This function prompts an LLM with a git diff to create a conventional
+    commit message following best practices.
+
+    Parameters
+    ----------
+    diff : str
+        The git diff content to base the commit message on.
+    model_name : str
+        The name of the LLM model to use for generation.
+
+    Returns
+    -------
+    str
+        A formatted commit message with title and optional body.
+
+    Raises
+    ------
+    typer.Exit
+        If the LLM model fails to generate a response.
+
+    Notes
+    -----
+    The generated message follows Conventional Commits format with a subject
+    line <= 50 characters and explanatory body when appropriate.
+
+    Examples
+    --------
+    >>> diff = "+def hello():\\n+    print('Hello, world!')"
+    >>> message = generate_commit_message(diff, 'gemini-2.5-flash-lite')
+    >>> print(message.split('\\n')[0])  # Subject line
+    feat: add hello function
+    """
     prompt = f"""
 You are an expert programmer tasked with writing a conventional commit message.
 Based on the following git diff, generate a commit message.
@@ -647,7 +921,46 @@ def generate_commit_plan(
     diff: str,
     model_name: str,
 ) -> list[CommitSuggestion]:
-    """Ask the LLM to propose a sequence of commits for the current tree."""
+    """
+    Ask the LLM to propose a sequence of commits for the current tree.
+
+    This function generates a structured commit plan by prompting an LLM
+    to analyze repository changes and group them into logical commits.
+
+    Parameters
+    ----------
+    status : RepoStatus
+        The current repository status including branch and file lists.
+    diff : str
+        The git diff content to provide context for planning.
+    model_name : str
+        The name of the LLM model to use for plan generation.
+
+    Returns
+    -------
+    list[CommitSuggestion]
+        A list of CommitSuggestion objects representing the proposed commits.
+        Returns empty list if no changes or if generation fails.
+
+    Raises
+    ------
+    None
+
+    Notes
+    -----
+    The LLM is instructed to create conventional commits with proper grouping
+    of related files. Paths are validated against actual repository files.
+    Limited to 5 commits maximum to avoid overly complex plans.
+
+    Examples
+    --------
+    >>> status = RepoStatus(branch='main', staged=['file1.py'], unstaged=[], untracked=[], summary='')
+    >>> plan = generate_commit_plan(status, 'diff content', 'gemini-2.5-flash-lite')
+    >>> len(plan)
+    1
+    >>> plan[0].title.startswith('feat:') or plan[0].title.startswith('fix:')
+    True
+    """
 
     if not status.has_changes:
         return []
@@ -728,7 +1041,36 @@ Relevant diff (truncated if necessary):
 
 
 def split_commit_message(message: str) -> tuple[str, str]:
-    """Split a full commit message into title and body."""
+    """
+    Split a full commit message into title and body.
+
+    This function parses a commit message string and separates it into
+    the title (first line) and body (remaining lines).
+
+    Parameters
+    ----------
+    message : str
+        The full commit message as a string.
+
+    Returns
+    -------
+    tuple[str, str]
+        A tuple containing (title, body). Title is truncated to 72 characters.
+        Body is the remaining content with leading/trailing whitespace removed.
+
+    Notes
+    -----
+    If the message is empty, returns a default title "chore: update" with empty body.
+    Blank lines between title and body are preserved in the body.
+
+    Examples
+    --------
+    >>> title, body = split_commit_message("feat: add feature\\n\\nThis adds a new feature.")
+    >>> title
+    'feat: add feature'
+    >>> body
+    'This adds a new feature.'
+    """
 
     lines = [line.rstrip() for line in message.strip().splitlines() if line.strip() or line == ""]
     if not lines:
@@ -739,7 +1081,38 @@ def split_commit_message(message: str) -> tuple[str, str]:
 
 
 def collect_diff_for_paths(paths: list[str], status: RepoStatus) -> str:
-    """Collect combined diff for the specified paths."""
+    """
+    Collect combined diff for the specified paths.
+
+    This function generates git diff output for a subset of files,
+    handling staged, unstaged, and untracked files appropriately.
+
+    Parameters
+    ----------
+    paths : list[str]
+        List of file paths to include in the diff.
+    status : RepoStatus
+        Repository status containing file classifications.
+
+    Returns
+    -------
+    str
+        Combined diff output as a string. Empty if no paths provided.
+
+    Notes
+    -----
+    Uses different git diff commands based on file status:
+    - Staged files: git diff --staged
+    - Unstaged files: git diff
+    - Untracked files: git diff --no-index /dev/null <path>
+
+    Examples
+    --------
+    >>> status = RepoStatus(branch='main', staged=['file1.py'], unstaged=[], untracked=[], summary='')
+    >>> diff = collect_diff_for_paths(['file1.py'], status)
+    >>> 'diff --git' in diff
+    True
+    """
 
     if not paths:
         return ""
@@ -767,6 +1140,39 @@ def collect_diff_for_paths(paths: list[str], status: RepoStatus) -> str:
 
 
 def run_git_diff_command(cmd: list[str]) -> str:
+    """
+    Run a git diff command and return its output.
+
+    This helper function executes git diff commands safely, handling
+    various exit conditions and returning appropriate output.
+
+    Parameters
+    ----------
+    cmd : list[str]
+        The git command and arguments as a list of strings.
+
+    Returns
+    -------
+    str
+        The stdout output from the git command, or empty string on fatal errors.
+
+    Raises
+    ------
+    typer.Exit
+        If git is not found in PATH.
+
+    Notes
+    -----
+    Non-zero exit codes are not treated as errors for git diff commands,
+    as they often indicate the presence of differences rather than failure.
+    Only fatal stderr messages result in empty return.
+
+    Examples
+    --------
+    >>> output = run_git_diff_command(['git', 'diff', '--staged'])
+    >>> isinstance(output, str)
+    True
+    """
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.stdout:
@@ -784,7 +1190,41 @@ def regenerate_commit_plan_messages(
     status: RepoStatus,
     model_name: str,
 ) -> list[CommitSuggestion]:
-    """Regenerate commit messages for the current plan assignments."""
+    """
+    Regenerate commit messages for the current plan assignments.
+
+    This function updates commit messages in a plan by regenerating them
+    based on the current file assignments and diffs.
+
+    Parameters
+    ----------
+    plan : list[CommitSuggestion]
+        The current commit plan with file assignments.
+    status : RepoStatus
+        Current repository status for diff generation.
+    model_name : str
+        The LLM model name to use for message generation.
+
+    Returns
+    -------
+    list[CommitSuggestion]
+        Updated list of CommitSuggestion objects with refreshed messages.
+
+    Notes
+    -----
+    Only regenerates messages for suggestions that have associated diffs.
+    Preserves original messages if no diff is available.
+
+    Examples
+    --------
+    >>> plan = [CommitSuggestion(title='old title', body='', paths=['file.py'])]
+    >>> status = RepoStatus(branch='main', staged=['file.py'], unstaged=[], untracked=[], summary='')
+    >>> new_plan = regenerate_commit_plan_messages(plan, status, 'gemini-2.5-flash-lite')
+    >>> len(new_plan)
+    1
+    >>> new_plan[0].title != 'old title'  # Message should be updated
+    True
+    """
 
     refreshed: list[CommitSuggestion] = []
     for suggestion in plan:
@@ -806,7 +1246,45 @@ def launch_commit_ui(
     plan: list[CommitSuggestion],
     allow_manual_commit: bool,
 ) -> Any | None:
-    """Launches the Textual workflow for reviewing and editing a commit message."""
+    """
+    Launch the Textual workflow for reviewing and editing a commit message.
+
+    This function initializes and runs the CommitWorkflowApp Textual application,
+    providing an interactive UI for commit planning and message editing.
+
+    Parameters
+    ----------
+    diff : str
+        The git diff content to display in the UI.
+    initial_message : str
+        The initial commit message to populate the editor.
+    model_name : str
+        The LLM model name for regeneration features.
+    status : RepoStatus
+        Current repository status information.
+    plan : list[CommitSuggestion]
+        The commit plan with suggestions and file assignments.
+    allow_manual_commit : bool
+        Whether to allow direct committing of staged changes.
+
+    Returns
+    -------
+    Any | None
+        The result from the UI interaction, typically a commit message string
+        or a dict with plan application details. None if cancelled.
+
+    Notes
+    -----
+    Falls back to system editor ($EDITOR) if Textual interface fails.
+    The UI allows editing messages, reassigning files, and applying plans.
+
+    Examples
+    --------
+    >>> status = RepoStatus(branch='main', staged=[], unstaged=[], untracked=[], summary='')
+    >>> result = launch_commit_ui('diff', 'message', 'model', status, [], False)
+    >>> result is None or isinstance(result, str) or isinstance(result, dict)
+    True
+    """
 
     def regenerate() -> str:
         return generate_commit_message(diff, model_name)
@@ -830,7 +1308,36 @@ def launch_commit_ui(
 
 
 def apply_commit_plan(plan: list[CommitSuggestion]) -> None:
-    """Apply the generated commit plan by staging files and committing."""
+    """
+    Apply the generated commit plan by staging files and committing.
+
+    This function executes a sequence of commits according to the provided plan,
+    staging the appropriate files for each commit and creating the commits.
+
+    Parameters
+    ----------
+    plan : list[CommitSuggestion]
+        List of CommitSuggestion objects defining the commits to apply.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    typer.Exit
+        If staging files fails for any commit in the plan.
+
+    Notes
+    -----
+    Each commit in the plan is applied sequentially. Files are staged
+    specifically for each commit to ensure correct grouping.
+
+    Examples
+    --------
+    >>> plan = [CommitSuggestion(title='feat: add feature', body='', paths=['feature.py'])]
+    >>> apply_commit_plan(plan)  # Stages feature.py and commits with the message
+    """
 
     if not plan:
         console.print("[yellow]No commit plan to apply.[/yellow]")
@@ -878,7 +1385,34 @@ def apply_commit_plan(plan: list[CommitSuggestion]) -> None:
 
         run_git_commit(suggestion.message)
 def run_git_commit(message: str):
-    """Runs git commit with the given message."""
+    """
+    Run git commit with the given message.
+
+    This function executes 'git commit -m <message>' to create a commit
+    with the specified message.
+
+    Parameters
+    ----------
+    message : str
+        The commit message to use.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    typer.Exit
+        If the git commit command fails.
+
+    Notes
+    -----
+    Assumes files are already staged. Prints success message on completion.
+
+    Examples
+    --------
+    >>> run_git_commit('feat: add new feature')  # Creates commit with message
+    """
     try:
         subprocess.run(["git", "commit", "-m", message], check=True)
         console.print("[green]✓ Commit successful![/green]")
@@ -891,7 +1425,49 @@ def main(
     model: str = typer.Option(DEFAULT_MODEL, "--model", "-m", help="LLM model to use"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation and commit directly"),
 ):
-    """Analyze changes, generate commit plans, and help author commits."""
+    """
+    Analyze changes, generate commit plans, and help author commits.
+
+    This is the main entry point for the commit assistant. It inspects the
+    repository, generates AI-powered commit messages and plans, and either
+    applies them directly or launches an interactive UI for review.
+
+    Parameters
+    ----------
+    model : str, optional
+        The LLM model name to use for generating messages and plans.
+        Default is from COMMIT_MODEL environment variable or 'gemini-2.5-flash-lite'.
+    yes : bool, optional
+        If True, skip interactive confirmation and commit directly.
+        Default is False.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    typer.Exit
+        On various error conditions like no changes, git failures, etc.
+
+    Notes
+    -----
+    The command flow:
+    1. Check for repository changes
+    2. Generate commit message/plan using LLM
+    3. Either apply directly (--yes) or launch interactive UI
+    4. Apply selected commits
+
+    Examples
+    --------
+    Interactive mode:
+
+    >>> main()
+
+    Direct commit with specific model:
+
+    >>> main(model='gpt-4', yes=True)
+    """
 
     console.print("[cyan]Inspecting repository status...[/cyan]")
     status = get_repo_status()

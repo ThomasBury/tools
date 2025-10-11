@@ -10,10 +10,25 @@
 # ]
 # ///
 """
-docs-serve: bootstrap and serve MkDocs (Material) with mkdocstrings (NumPy style).
+Bootstrap and serve MkDocs documentation with Material theme and mkdocstrings.
 
-- Creates mkdocs.yml, docs/index.md, docs/api.md if missing.
-- Serves locally or builds static site.
+This module provides a command-line interface to automatically scaffold and serve
+MkDocs documentation for Python projects. It creates necessary configuration files
+and serves the documentation with live reload.
+
+Notes
+-----
+The module uses mkdocstrings with NumPy-style docstring rendering.
+
+Examples
+--------
+To serve documentation locally:
+
+    $ python docs_serve.py serve
+
+To build static site:
+
+    $ python docs_serve.py build
 """
 
 from __future__ import annotations
@@ -31,7 +46,26 @@ console = Console()
 ROOT = Path.cwd()
 
 def run(cmd: list[str]) -> int:
-    """Executes a command, prints it, and returns its exit code."""
+    """
+    Execute a command and return its exit code.
+
+    Parameters
+    ----------
+    cmd : list[str]
+        The command to execute as a list of strings.
+
+    Returns
+    -------
+    int
+        The exit code of the command.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the command is not found.
+    OSError
+        If execution fails.
+    """
     console.print(f"[dim]$ {' '.join(cmd)}[/dim]")
     try:
         completed = sp.run(cmd, check=False)
@@ -47,7 +81,18 @@ def run(cmd: list[str]) -> int:
     return completed.returncode
 
 def guess_pkg_name() -> str | None:
-    """Tries to guess the package name from pyproject.toml or src/ layout."""
+    """
+    Guess the package name from project configuration or directory structure.
+
+    Attempts to determine the package name by checking pyproject.toml for PEP 621
+    project name, or Poetry/Hatch configurations. Falls back to src/ layout or
+    flat layout detection.
+
+    Returns
+    -------
+    str or None
+        The guessed package name, or None if not found.
+    """
     # Attempt to read from pyproject.toml (PEP 621)
     pyproject_path = ROOT / "pyproject.toml"
     if pyproject_path.exists():
@@ -86,13 +131,20 @@ def guess_pkg_name() -> str | None:
 
 def ensure_scaffold(explicit_pkg: str | None = None) -> str:
     """
-    Ensures the necessary MkDocs files and directories exist.
+    Ensure MkDocs scaffolding files exist.
 
-    Args:
-        explicit_pkg (str | None): Explicit package name to use. If None, attempts to auto-detect.
+    Creates mkdocs.yml, docs/index.md, and docs/api.md if they do not exist.
+    Uses the provided package name or auto-detects it.
 
-    Returns:
-        str: The package name used for scaffolding.
+    Parameters
+    ----------
+    explicit_pkg : str or None, optional
+        Explicit package name to use. If None, attempts to auto-detect.
+
+    Returns
+    -------
+    str
+        The package name used for scaffolding.
     """
     pkg_name = explicit_pkg or guess_pkg_name()
     if not pkg_name:
@@ -152,7 +204,14 @@ def build(
         help="Override the detected package/module name.",
     )
 ):
-    """Build static docs site into ./site."""
+    """
+    Build static documentation site.
+
+    Parameters
+    ----------
+    package : str or None, optional
+        Override the detected package/module name.
+    """
     ensure_scaffold(package)
     console.print("\n[bold cyan]Building static documentation...[/bold cyan]")
     exit_code = run([sys.executable, "-m", "mkdocs", "build", "--clean"])
@@ -176,7 +235,18 @@ def serve(
         help="Override the detected package/module name.",
     ),
 ):
-    """Serve docs with live reload (default: 127.0.0.1:8000)."""
+    """
+    Serve documentation with live reload.
+
+    Parameters
+    ----------
+    port : int, optional
+        Port to serve documentation on (default: 8000).
+    host : str, optional
+        Host interface to bind the server (default: '127.0.0.1').
+    package : str or None, optional
+        Override the detected package/module name.
+    """
     ensure_scaffold(package)
     console.print("\n[bold cyan]Starting live-reload server...[/bold cyan]")
     cmd = [sys.executable, "-m", "mkdocs", "serve", "-a", f"{host}:{port}"]

@@ -14,24 +14,40 @@
 # ]
 # ///
 """
-daily-flow: MCP-powered daily workflow and standup assistant.
+MCP-powered daily workflow and standup assistant.
 
 This micro-agent integrates with multiple data sources via MCP to provide
 comprehensive daily reviews, standup reports, and workflow insights.
 
-Features:
+Features
+--------
 - Aggregates data from filesystem, git, GitHub, calendar, and task systems
 - Generates intelligent daily standup reports
 - Tracks progress on goals and blockers
 - Provides actionable insights and priority recommendations
 - Exports reports in multiple formats
 
-Usage:
-    ./daily_flow.py standup                    # Generate standup report
-    ./daily_flow.py review --days 7            # Weekly review
-    ./daily_flow.py focus                      # What to focus on today
-    ./daily_flow.py blockers                   # Identify blockers
-    ./daily_flow.py export --format markdown   # Export report
+Examples
+--------
+Generate daily standup report:
+
+>>> ./daily_flow.py standup
+
+Weekly review:
+
+>>> ./daily_flow.py review --days 7
+
+Get focus recommendations:
+
+>>> ./daily_flow.py focus
+
+Identify blockers:
+
+>>> ./daily_flow.py blockers
+
+Export report in markdown format:
+
+>>> ./daily_flow.py export --format markdown
 """
 
 from __future__ import annotations
@@ -71,7 +87,23 @@ DEFAULT_NOTES_DIR = Path.home() / "notes"
 
 
 class DataSource(str, Enum):
-    """Supported data sources."""
+    """Enumeration of supported data sources for workflow collection.
+
+    Attributes
+    ----------
+    FILESYSTEM : str
+        Local filesystem and notes directory data source.
+    GIT : str
+        Git repository commit and status information.
+    GITHUB : str
+        GitHub pull requests and issues.
+    CALENDAR : str
+        Calendar events and scheduling data.
+    OBSIDIAN : str
+        Obsidian notes and knowledge base.
+    SLACK : str
+        Slack messages and team communication.
+    """
     FILESYSTEM = "filesystem"
     GIT = "git"
     GITHUB = "github"
@@ -81,7 +113,19 @@ class DataSource(str, Enum):
 
 
 class ReportFormat(str, Enum):
-    """Report output formats."""
+    """Enumeration of supported report output formats.
+
+    Attributes
+    ----------
+    TERMINAL : str
+        Rich-formatted terminal display with colors and tables.
+    MARKDOWN : str
+        Markdown format suitable for documentation and sharing.
+    JSON : str
+        Structured JSON format for programmatic access.
+    HTML : str
+        HTML format for web display and reports.
+    """
     TERMINAL = "terminal"
     MARKDOWN = "markdown"
     JSON = "json"
@@ -90,7 +134,29 @@ class ReportFormat(str, Enum):
 
 @dataclass
 class WorkItem:
-    """Represents a unit of work."""
+    """Represents a unit of work from various data sources.
+
+    Attributes
+    ----------
+    title : str
+        Brief title or name of the work item.
+    description : Optional[str]
+        Detailed description of the work item.
+    source : DataSource
+        The data source this item originated from.
+    timestamp : Optional[datetime]
+        When this work item was created or last modified.
+    status : str
+        Current status (e.g., 'completed', 'in_progress', 'blocked').
+    tags : List[str]
+        List of tags for categorization and filtering.
+    priority : Optional[int]
+        Priority level (lower numbers indicate higher priority).
+    url : Optional[str]
+        URL link to the original item (e.g., GitHub PR/issue).
+    metadata : Dict[str, Any]
+        Additional source-specific metadata.
+    """
     title: str
     description: Optional[str]
     source: DataSource
@@ -104,7 +170,27 @@ class WorkItem:
 
 @dataclass
 class DailyReport:
-    """Complete daily workflow report."""
+    """Complete daily workflow report with categorized work items and insights.
+
+    Attributes
+    ----------
+    date : datetime
+        Date this report covers.
+    completed_items : List[WorkItem]
+        Work items that have been completed.
+    in_progress_items : List[WorkItem]
+        Work items currently being worked on.
+    blocked_items : List[WorkItem]
+        Work items that are blocked or waiting.
+    upcoming_items : List[WorkItem]
+        Work items planned for the future.
+    insights : List[str]
+        AI-generated insights about the workflow.
+    recommendations : List[str]
+        Actionable recommendations for improvement.
+    metrics : Dict[str, Any]
+        Productivity metrics and statistics.
+    """
     date: datetime
     completed_items: List[WorkItem]
     in_progress_items: List[WorkItem]
@@ -116,7 +202,22 @@ class DailyReport:
 
 
 class MCPServer:
-    """Configuration for an MCP server."""
+    """Configuration for an MCP server.
+
+    Parameters
+    ----------
+    name : str
+        Name identifier for the MCP server.
+    command : Optional[str], default=None
+        Command to execute for the MCP server process.
+    args : Optional[List[str]], default=None
+        Arguments to pass to the MCP server command.
+
+    Attributes
+    ----------
+    session : Optional[ClientSession]
+        Active MCP client session when connected.
+    """
     def __init__(self, name: str, command: Optional[str] = None, args: Optional[List[str]] = None):
         self.name = name
         self.command = command
@@ -127,7 +228,22 @@ class MCPServer:
         self._context = None
     
     async def connect(self) -> bool:
-        """Connect to the MCP server."""
+        """Connect to the MCP server.
+
+        Establishes a connection to the configured MCP server using stdio
+        communication. Initializes the client session and performs handshake.
+
+        Returns
+        -------
+        bool
+            True if connection was successful, False otherwise.
+
+        Raises
+        ------
+        Exception
+            Connection or initialization failures are caught and logged,
+            returning False instead of raising.
+        """
         try:
             if self.command:
                 params = StdioServerParameters(
@@ -138,7 +254,7 @@ class MCPServer:
                 self._read, self._write = await self._context.__aenter__()
             else:
                 return False
-            
+
             self.session = ClientSession(self._read, self._write)
             await self.session.__aenter__()
             await self.session.initialize()
@@ -148,7 +264,11 @@ class MCPServer:
             return False
     
     async def disconnect(self) -> None:
-        """Disconnect from the MCP server."""
+        """Disconnect from the MCP server.
+
+        Properly closes the client session and stdio context.
+        Silently handles any cleanup errors.
+        """
         if self.session:
             try:
                 await self.session.__aexit__(None, None, None)
@@ -161,10 +281,29 @@ class MCPServer:
                 pass
     
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Optional[Any]:
-        """Call a tool on the MCP server."""
+        """Call a tool on the MCP server.
+
+        Parameters
+        ----------
+        tool_name : str
+            Name of the tool to execute on the server.
+        arguments : Dict[str, Any]
+            Arguments to pass to the tool.
+
+        Returns
+        -------
+        Optional[Any]
+            Tool execution result, or None if failed or no session.
+            For list content, text fields are concatenated.
+
+        Raises
+        ------
+        Exception
+            Tool execution errors are caught and logged, returning None.
+        """
         if not self.session:
             return None
-        
+
         try:
             result = await self.session.call_tool(tool_name, arguments=arguments)
             if result.content:
@@ -184,28 +323,38 @@ class MCPServer:
 
 
 class DataCollector:
-    """Collects data from various MCP sources."""
-    
+    """Collects data from various MCP sources.
+
+    Attributes
+    ----------
+    servers : Dict[str, MCPServer]
+        Dictionary of configured MCP servers by name.
+    """
+
     def __init__(self):
         self.servers: Dict[str, MCPServer] = {}
         self._setup_servers()
     
     def _setup_servers(self) -> None:
-        """Setup MCP server configurations."""
+        """Setup MCP server configurations.
+
+        Configures filesystem, git, and optionally GitHub MCP servers
+        based on environment and default paths.
+        """
         # Filesystem MCP for notes and documents
         self.servers['filesystem'] = MCPServer(
             'filesystem',
             'npx',
             ['-y', '@modelcontextprotocol/server-filesystem', str(DEFAULT_NOTES_DIR)]
         )
-        
+
         # Git MCP for repository information
         self.servers['git'] = MCPServer(
             'git',
             'npx',
             ['-y', '@modelcontextprotocol/server-git', str(DEFAULT_WORKSPACE)]
         )
-        
+
         # GitHub MCP (if configured)
         if github_token := os.environ.get('GITHUB_TOKEN'):
             self.servers['github'] = MCPServer(
@@ -215,28 +364,46 @@ class DataCollector:
             )
     
     async def connect_all(self) -> None:
-        """Connect to all configured MCP servers."""
+        """Connect to all configured MCP servers.
+
+        Attempts to establish connections to all servers in parallel.
+        Reports the number of successful connections.
+        """
         tasks = [server.connect() for server in self.servers.values()]
         results = await asyncio.gather(*tasks)
-        
+
         connected = sum(1 for r in results if r)
         console.print(f"[green]Connected to {connected}/{len(self.servers)} MCP servers[/green]")
     
     async def disconnect_all(self) -> None:
-        """Disconnect from all MCP servers."""
+        """Disconnect from all MCP servers.
+
+        Closes all active server connections in parallel.
+        """
         tasks = [server.disconnect() for server in self.servers.values()]
         await asyncio.gather(*tasks)
     
     async def collect_filesystem_data(self, days_back: int = 1) -> List[WorkItem]:
-        """Collect data from filesystem (notes, documents)."""
+        """Collect data from filesystem (notes, documents).
+
+        Parameters
+        ----------
+        days_back : int, default=1
+            Number of days to look back for recent file changes.
+
+        Returns
+        -------
+        List[WorkItem]
+            List of work items representing recent note updates.
+        """
         items = []
         server = self.servers.get('filesystem')
         if not server or not server.session:
             return items
-        
+
         # Get recent files
         since = datetime.now(timezone.utc) - timedelta(days=days_back)
-        
+
         # List recent markdown files (notes)
         result = await server.call_tool('list_directory', {'path': '.'})
         if result:
@@ -247,7 +414,7 @@ class DataCollector:
                         # Read file metadata
                         file_path = file_info.get('path', file_info.get('name'))
                         stat_result = await server.call_tool('get_file_info', {'path': file_path})
-                        
+
                         if stat_result:
                             # Parse modification time
                             items.append(WorkItem(
@@ -260,16 +427,27 @@ class DataCollector:
                             ))
             except Exception as e:
                 console.print(f"[yellow]Warning: Error parsing filesystem data: {e}[/yellow]")
-        
+
         return items
     
     async def collect_git_data(self, days_back: int = 1) -> List[WorkItem]:
-        """Collect data from git repositories."""
+        """Collect data from git repositories.
+
+        Parameters
+        ----------
+        days_back : int, default=1
+            Number of days to look back for commits (currently unused).
+
+        Returns
+        -------
+        List[WorkItem]
+            List of work items from recent commits and repository status.
+        """
         items = []
         server = self.servers.get('git')
         if not server or not server.session:
             return items
-        
+
         # Get recent commits
         result = await server.call_tool('git_log', {'max_count': 20})
         if result:
@@ -288,7 +466,7 @@ class DataCollector:
                         ))
             except Exception as e:
                 console.print(f"[yellow]Warning: Error parsing git data: {e}[/yellow]")
-        
+
         # Get current branch status
         branch_result = await server.call_tool('git_status', {})
         if branch_result:
@@ -301,23 +479,34 @@ class DataCollector:
                     status='in_progress',
                     tags=['git', 'wip']
                 ))
-        
+
         return items
     
     async def collect_github_data(self, days_back: int = 1) -> List[WorkItem]:
-        """Collect data from GitHub."""
+        """Collect data from GitHub.
+
+        Parameters
+        ----------
+        days_back : int, default=1
+            Number of days to look back (currently unused, fetches recent items).
+
+        Returns
+        -------
+        List[WorkItem]
+            List of work items from pull requests and issues.
+        """
         items = []
-        
+
         # Use gh CLI as fallback if MCP server not available
         try:
             # Get user's recent PRs
             result = sp.run(
-                ['gh', 'pr', 'list', '--author', '@me', '--json', 
+                ['gh', 'pr', 'list', '--author', '@me', '--json',
                  'number,title,state,createdAt,url', '--limit', '10'],
                 capture_output=True,
                 text=True
             )
-            
+
             if result.returncode == 0:
                 prs = json.loads(result.stdout)
                 for pr in prs:
@@ -330,7 +519,7 @@ class DataCollector:
                         tags=['github', 'pr'],
                         url=pr['url']
                     ))
-            
+
             # Get assigned issues
             result = sp.run(
                 ['gh', 'issue', 'list', '--assignee', '@me', '--json',
@@ -338,7 +527,7 @@ class DataCollector:
                 capture_output=True,
                 text=True
             )
-            
+
             if result.returncode == 0:
                 issues = json.loads(result.stdout)
                 for issue in issues:
@@ -353,42 +542,75 @@ class DataCollector:
                     ))
         except Exception as e:
             console.print(f"[yellow]Warning: Could not fetch GitHub data: {e}[/yellow]")
-        
+
         return items
     
     async def collect_all_data(self, days_back: int = 1) -> List[WorkItem]:
-        """Collect data from all available sources."""
+        """Collect data from all available sources.
+
+        Parameters
+        ----------
+        days_back : int, default=1
+            Number of days to look back for data collection.
+
+        Returns
+        -------
+        List[WorkItem]
+            Combined list of work items from all sources.
+        """
         tasks = [
             self.collect_filesystem_data(days_back),
             self.collect_git_data(days_back),
             self.collect_github_data(days_back),
         ]
-        
+
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
+
         all_items = []
         for result in results:
             if isinstance(result, list):
                 all_items.extend(result)
             elif isinstance(result, Exception):
                 console.print(f"[yellow]Warning: Data collection error: {result}[/yellow]")
-        
+
         return all_items
 
 
 class ReportGenerator:
-    """Generates intelligent reports from collected data."""
-    
+    """Generates intelligent reports from collected data.
+
+    Parameters
+    ----------
+    model_name : str, default=DEFAULT_MODEL
+        Name of the LLM model to use for AI-powered insights.
+
+    Attributes
+    ----------
+    model_name : str
+        The configured LLM model name.
+    """
+
     def __init__(self, model_name: str = DEFAULT_MODEL):
         self.model_name = model_name
     
     def categorize_items(self, items: List[WorkItem]) -> Tuple[List[WorkItem], List[WorkItem], List[WorkItem], List[WorkItem]]:
-        """Categorize work items by status."""
+        """Categorize work items by status.
+
+        Parameters
+        ----------
+        items : List[WorkItem]
+            List of work items to categorize.
+
+        Returns
+        -------
+        Tuple[List[WorkItem], List[WorkItem], List[WorkItem], List[WorkItem]]
+            Tuple of (completed, in_progress, blocked, upcoming) items.
+        """
         completed = []
         in_progress = []
         blocked = []
         upcoming = []
-        
+
         for item in items:
             if item.status in ['completed', 'closed', 'merged']:
                 completed.append(item)
@@ -398,26 +620,38 @@ class ReportGenerator:
                 blocked.append(item)
             else:
                 upcoming.append(item)
-        
+
         return completed, in_progress, blocked, upcoming
     
     def calculate_metrics(self, items: List[WorkItem]) -> Dict[str, Any]:
-        """Calculate productivity metrics."""
+        """Calculate productivity metrics.
+
+        Parameters
+        ----------
+        items : List[WorkItem]
+            List of work items to analyze.
+
+        Returns
+        -------
+        Dict[str, Any]
+            Dictionary containing metrics like total_items, completed,
+            completion_rate, by_source, and by_tag.
+        """
         total = len(items)
         by_source = {}
         by_tag = {}
-        
+
         for item in items:
             # Count by source
             source_key = item.source.value
             by_source[source_key] = by_source.get(source_key, 0) + 1
-            
+
             # Count by tag
             for tag in item.tags:
                 by_tag[tag] = by_tag.get(tag, 0) + 1
-        
+
         completed_count = sum(1 for i in items if i.status in ['completed', 'closed', 'merged'])
-        
+
         return {
             'total_items': total,
             'completed': completed_count,
@@ -427,27 +661,38 @@ class ReportGenerator:
         }
     
     async def generate_insights(self, report: DailyReport) -> List[str]:
-        """Generate AI-powered insights from the report."""
+        """Generate AI-powered insights from the report.
+
+        Parameters
+        ----------
+        report : DailyReport
+            The daily report to analyze for insights.
+
+        Returns
+        -------
+        List[str]
+            List of insight strings, combining basic heuristics and AI analysis.
+        """
         insights = []
-        
+
         # Basic insights without AI
         metrics = report.metrics
-        
+
         if metrics['completion_rate'] > 80:
             insights.append("🎯 Excellent completion rate! You're being highly productive.")
         elif metrics['completion_rate'] < 30:
             insights.append("⚠️ Low completion rate. Consider focusing on fewer tasks.")
-        
+
         if len(report.blocked_items) > 0:
             insights.append(f"🚧 You have {len(report.blocked_items)} blocked items that need attention.")
-        
+
         if len(report.in_progress_items) > 5:
             insights.append("📊 High WIP count. Consider completing current tasks before starting new ones.")
-        
+
         # AI-powered insights if model available
         try:
             model = llm.get_model(self.model_name)
-            
+
             # Build context for AI
             context = f"""
             Daily workflow analysis:
@@ -455,53 +700,77 @@ class ReportGenerator:
             - In Progress: {len(report.in_progress_items)} items
             - Blocked: {len(report.blocked_items)} items
             - Sources: {', '.join(metrics['by_source'].keys())}
-            
+
             Completed items:
             {chr(10).join([f"- {item.title}" for item in report.completed_items[:5]])}
-            
+
             In progress:
             {chr(10).join([f"- {item.title}" for item in report.in_progress_items[:5]])}
-            
+
             Provide 2-3 concise, actionable insights about this workflow.
             """
-            
+
             response = model.prompt(context)
             ai_insights = response.text().split('\n')
             insights.extend([i.strip() for i in ai_insights if i.strip()][:3])
         except:
             pass  # Fall back to basic insights
-        
+
         return insights
     
     async def generate_recommendations(self, report: DailyReport) -> List[str]:
-        """Generate actionable recommendations."""
+        """Generate actionable recommendations.
+
+        Parameters
+        ----------
+        report : DailyReport
+            The daily report to analyze for recommendations.
+
+        Returns
+        -------
+        List[str]
+            List of recommendation strings for next actions.
+        """
         recommendations = []
-        
+
         # Priority recommendations
         if report.blocked_items:
             recommendations.append(f"Unblock: {report.blocked_items[0].title}")
-        
+
         if report.in_progress_items:
             # Find oldest in-progress item
-            oldest = min(report.in_progress_items, 
+            oldest = min(report.in_progress_items,
                         key=lambda x: x.timestamp or datetime.now(timezone.utc))
             recommendations.append(f"Complete: {oldest.title}")
-        
+
         # Balance recommendations
         by_source = report.metrics['by_source']
         if 'git' in by_source and by_source['git'] == 0:
             recommendations.append("Commit your code changes")
-        
+
         if 'github' in by_source and 'pr' in report.metrics['by_tag']:
             recommendations.append("Review and merge pending PRs")
-        
+
         return recommendations
     
     async def create_report(self, items: List[WorkItem], date: datetime) -> DailyReport:
-        """Create a comprehensive daily report."""
+        """Create a comprehensive daily report.
+
+        Parameters
+        ----------
+        items : List[WorkItem]
+            List of work items to include in the report.
+        date : datetime
+            Date for the report.
+
+        Returns
+        -------
+        DailyReport
+            Complete report with categorized items, metrics, insights, and recommendations.
+        """
         completed, in_progress, blocked, upcoming = self.categorize_items(items)
         metrics = self.calculate_metrics(items)
-        
+
         report = DailyReport(
             date=date,
             completed_items=completed,
@@ -512,10 +781,10 @@ class ReportGenerator:
             recommendations=[],
             metrics=metrics
         )
-        
+
         report.insights = await self.generate_insights(report)
         report.recommendations = await self.generate_recommendations(report)
-        
+
         return report
 
 
@@ -524,26 +793,32 @@ class ReportFormatter:
     
     @staticmethod
     def format_terminal(report: DailyReport) -> None:
-        """Format report for terminal display."""
+        """Format report for terminal display.
+
+        Parameters
+        ----------
+        report : DailyReport
+            The report to format and display in the terminal.
+        """
         # Header
         console.print(Panel.fit(
             f"[bold]Daily Workflow Report[/bold]\n"
             f"Date: {report.date.strftime('%Y-%m-%d')}",
             border_style="cyan"
         ))
-        
+
         # Metrics summary
         metrics_table = Table(title="Metrics", show_header=False)
         metrics_table.add_column("Metric", style="cyan")
         metrics_table.add_column("Value", justify="right")
-        
+
         metrics_table.add_row("Total Items", str(report.metrics['total_items']))
         metrics_table.add_row("Completed", str(report.metrics['completed']))
         metrics_table.add_row("Completion Rate", f"{report.metrics['completion_rate']:.1f}%")
-        
+
         console.print(metrics_table)
         console.print()
-        
+
         # Work items by category
         if report.completed_items:
             console.print("[bold green]✅ Completed[/bold green]")
@@ -552,7 +827,7 @@ class ReportFormatter:
             if len(report.completed_items) > 5:
                 console.print(f"  ... and {len(report.completed_items) - 5} more")
             console.print()
-        
+
         if report.in_progress_items:
             console.print("[bold yellow]🚧 In Progress[/bold yellow]")
             for item in report.in_progress_items[:5]:
@@ -560,20 +835,20 @@ class ReportFormatter:
             if len(report.in_progress_items) > 5:
                 console.print(f"  ... and {len(report.in_progress_items) - 5} more")
             console.print()
-        
+
         if report.blocked_items:
             console.print("[bold red]⛔ Blocked[/bold red]")
             for item in report.blocked_items:
                 console.print(f"  • {item.title}")
             console.print()
-        
+
         # Insights
         if report.insights:
             console.print("[bold]💡 Insights[/bold]")
             for insight in report.insights:
                 console.print(f"  {insight}")
             console.print()
-        
+
         # Recommendations
         if report.recommendations:
             console.print("[bold]🎯 Recommendations[/bold]")
@@ -582,7 +857,18 @@ class ReportFormatter:
     
     @staticmethod
     def format_markdown(report: DailyReport) -> str:
-        """Format report as markdown."""
+        """Format report as markdown.
+
+        Parameters
+        ----------
+        report : DailyReport
+            The report to format as markdown.
+
+        Returns
+        -------
+        str
+            Markdown formatted report string.
+        """
         lines = [
             f"# Daily Workflow Report",
             f"**Date:** {report.date.strftime('%Y-%m-%d')}",
@@ -593,43 +879,54 @@ class ReportFormatter:
             f"- Completion Rate: {report.metrics['completion_rate']:.1f}%",
             ""
         ]
-        
+
         if report.completed_items:
             lines.append("## ✅ Completed")
             for item in report.completed_items:
                 url_suffix = f" ([link]({item.url}))" if item.url else ""
                 lines.append(f"- {item.title}{url_suffix}")
             lines.append("")
-        
+
         if report.in_progress_items:
             lines.append("## 🚧 In Progress")
             for item in report.in_progress_items:
                 url_suffix = f" ([link]({item.url}))" if item.url else ""
                 lines.append(f"- {item.title}{url_suffix}")
             lines.append("")
-        
+
         if report.blocked_items:
             lines.append("## ⛔ Blocked")
             for item in report.blocked_items:
                 lines.append(f"- {item.title}")
             lines.append("")
-        
+
         if report.insights:
             lines.append("## 💡 Insights")
             for insight in report.insights:
                 lines.append(f"- {insight}")
             lines.append("")
-        
+
         if report.recommendations:
             lines.append("## 🎯 Recommendations")
             for i, rec in enumerate(report.recommendations, 1):
                 lines.append(f"{i}. {rec}")
-        
+
         return "\n".join(lines)
     
     @staticmethod
     def format_json(report: DailyReport) -> str:
-        """Format report as JSON."""
+        """Format report as JSON.
+
+        Parameters
+        ----------
+        report : DailyReport
+            The report to format as JSON.
+
+        Returns
+        -------
+        str
+            JSON formatted report string.
+        """
         data = {
             'date': report.date.isoformat(),
             'metrics': report.metrics,
@@ -671,7 +968,17 @@ def standup(
     format: ReportFormat = typer.Option(ReportFormat.TERMINAL, "--format", "-f", help="Output format"),
     export_path: Optional[Path] = typer.Option(None, "--export", "-e", help="Export to file"),
 ) -> None:
-    """Generate daily standup report."""
+    """Generate daily standup report.
+
+    Parameters
+    ----------
+    days_back : int, default=1
+        Number of days to look back for data collection.
+    format : ReportFormat, default=ReportFormat.TERMINAL
+        Output format for the report.
+    export_path : Optional[Path], default=None
+        Path to export the report to file, if specified.
+    """
     
     async def run():
         with Progress(
@@ -727,7 +1034,15 @@ def review(
     days: int = typer.Option(7, "--days", "-d", help="Days to review"),
     format: ReportFormat = typer.Option(ReportFormat.TERMINAL, "--format", "-f", help="Output format"),
 ) -> None:
-    """Generate a comprehensive review for the specified period."""
+    """Generate a comprehensive review for the specified period.
+
+    Parameters
+    ----------
+    days : int, default=7
+        Number of days to include in the review.
+    format : ReportFormat, default=ReportFormat.TERMINAL
+        Output format for the report.
+    """
     
     # Reuse standup with more days
     standup(days_back=days, format=format)
@@ -735,7 +1050,11 @@ def review(
 
 @app.command()
 def focus() -> None:
-    """Get focus recommendations for today."""
+    """Get focus recommendations for today.
+
+    Analyzes current work items and provides prioritized recommendations
+    for what to focus on in the immediate term.
+    """
     
     async def run():
         # Quick focused analysis
@@ -778,7 +1097,11 @@ def focus() -> None:
 
 @app.command()
 def blockers() -> None:
-    """Identify and analyze blockers."""
+    """Identify and analyze blockers.
+
+    Scans for blocked work items and stale in-progress tasks,
+    providing analysis and suggested actions to unblock progress.
+    """
     
     async def run():
         collector = DataCollector()
@@ -850,7 +1173,17 @@ def export(
     output: Path = typer.Option(Path("daily_report"), "--output", "-o", help="Output file path"),
     days: int = typer.Option(1, "--days", "-d", help="Days to include"),
 ) -> None:
-    """Export workflow report to file."""
+    """Export workflow report to file.
+
+    Parameters
+    ----------
+    format : ReportFormat, default=ReportFormat.MARKDOWN
+        Format for the exported report.
+    output : Path, default=Path("daily_report")
+        Base path for the output file (extension added automatically).
+    days : int, default=1
+        Number of days of data to include in the report.
+    """
     
     # Determine file extension
     extensions = {
@@ -867,7 +1200,11 @@ def export(
 
 @app.command()
 def config() -> None:
-    """Show configuration and MCP server status."""
+    """Show configuration and MCP server status.
+
+    Displays current settings, default paths, and tests connectivity
+    to configured MCP servers. Useful for troubleshooting setup issues.
+    """
     
     async def run():
         console.print(Panel.fit(

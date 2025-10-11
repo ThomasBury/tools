@@ -11,22 +11,34 @@
 # ]
 # ///
 """
-pr-review: AI-powered GitHub PR reviewer using gh CLI.
+AI-powered GitHub PR reviewer using gh CLI.
 
-Features:
-- Pre-flight PR preparation with best-practice checks and AI-crafted descriptions
-- Creates pull requests via the GitHub CLI (gh must be installed and authenticated)
-- Fetches PR diffs using gh CLI for AI-assisted reviews
-- Provides intelligent code review with AI (supports multiple models via llm)
-- Checks for common issues, security concerns, and suggests improvements
-- Integrates with GitHub's review system to post comments
+Extended Summary
+----------------
+This module provides a comprehensive tool for managing GitHub pull requests
+with AI assistance. It integrates with the GitHub CLI (gh) for repository
+operations and uses large language models for intelligent code review and
+description generation.
 
-Usage:
-    ./pr_review.py prepare --describe  # Inspect branch and draft a PR description
-    ./pr_review.py create --title "Add feature" --body "..."  # Create a PR using gh
-    ./pr_review.py review 123  # Review PR #123 in current repo
-    ./pr_review.py review owner/repo 123  # Review PR in specific repo
-    ./pr_review.py check  # Check recent PRs needing review
+Features
+--------
+- Pre-flight PR preparation with best-practice checks
+- AI-crafted PR descriptions using configurable models
+- Pull request creation via GitHub CLI
+- AI-assisted code reviews with focus areas (security, performance, etc.)
+- Integration with GitHub's review system for posting comments
+- Support for multiple LLM models via the llm library
+
+Usage
+-----
+Basic usage examples:
+
+.. code-block:: bash
+
+    ./pr_review.py prepare --describe  # Inspect branch and draft PR description
+    ./pr_review.py create --title "Add feature" --body "..."  # Create PR
+    ./pr_review.py review 123  # Review PR #123
+    ./pr_review.py check  # List PRs needing review
 """
 
 from __future__ import annotations
@@ -56,7 +68,20 @@ DEFAULT_MODEL = "gemini-2.5-flash-lite"
 
 
 def git_output(args: list[str], *, strip: bool = True) -> Optional[str]:
-    """Run a git command and return its stdout."""
+    """Run a git command and return its stdout.
+
+    Parameters
+    ----------
+    args : list[str]
+        Arguments to pass to the git command.
+    strip : bool, optional
+        Whether to strip whitespace from the output. Default is True.
+
+    Returns
+    -------
+    Optional[str]
+        The stdout of the command, or None if the command failed.
+    """
 
     try:
         result = sp.run(
@@ -72,6 +97,13 @@ def git_output(args: list[str], *, strip: bool = True) -> Optional[str]:
 
 
 def list_local_branches() -> list[str]:
+    """List all local branches in the repository.
+
+    Returns
+    -------
+    list[str]
+        List of local branch names, excluding any remote tracking branches.
+    """
     output = git_output(["for-each-ref", "--format=%(refname:short)", "refs/heads"], strip=False)
     if not output:
         return []
@@ -79,7 +111,21 @@ def list_local_branches() -> list[str]:
 
 
 def prompt_for_base_branch(initial: RepoState) -> tuple[str, RepoState]:
-    """Prompt the user to choose the base branch for the PR."""
+    """Prompt the user to choose the base branch for the PR.
+
+    Displays a list of candidate branches and allows selection by name or number.
+    Refreshes repository state with the selected base branch.
+
+    Parameters
+    ----------
+    initial : RepoState
+        Initial repository state to determine default candidates.
+
+    Returns
+    -------
+    tuple[str, RepoState]
+        Selected base branch name and updated repository state.
+    """
 
     default_base = initial.base_branch or "main"
     candidates = list(dict.fromkeys([
@@ -122,11 +168,38 @@ def prompt_for_base_branch(initial: RepoState) -> tuple[str, RepoState]:
 
 
 def get_branch_remote(branch: str) -> str:
+    """Get the remote associated with a branch.
+
+    Parameters
+    ----------
+    branch : str
+        Name of the branch.
+
+    Returns
+    -------
+    str
+        Remote name for the branch, defaults to "origin" if not configured.
+    """
     remote = git_output(["config", f"branch.{branch}.remote"])
     return remote or "origin"
 
 
 def push_branch_if_needed(state: RepoState) -> None:
+    """Push the current branch to remote if necessary for PR creation.
+
+    Checks if the branch has an upstream or is ahead of remote, and prompts
+    the user to push if needed. Aborts PR creation if push fails or is declined.
+
+    Parameters
+    ----------
+    state : RepoState
+        Current repository state information.
+
+    Raises
+    ------
+    typer.Exit
+        If the user declines to push or if the push command fails.
+    """
     upstream_missing = not state.upstream
     ahead_only = state.ahead > 0
 
@@ -154,7 +227,18 @@ def push_branch_if_needed(state: RepoState) -> None:
         raise typer.Exit(1)
 
 def resolve_base_reference(explicit_base: Optional[str]) -> tuple[str, str, Optional[str]]:
-    """Determine the base branch and diff reference for comparisons."""
+    """Determine the base branch and diff reference for comparisons.
+
+    Parameters
+    ----------
+    explicit_base : Optional[str]
+        Explicit base branch name, if provided.
+
+    Returns
+    -------
+    tuple[str, str, Optional[str]]
+        Base branch name, diff reference, and upstream branch (if any).
+    """
 
     upstream = git_output(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
     if explicit_base:
@@ -176,7 +260,18 @@ def resolve_base_reference(explicit_base: Optional[str]) -> tuple[str, str, Opti
 
 
 def inspect_repository(base: Optional[str] = None) -> Optional[RepoState]:
-    """Collect repository status details for PR preparation."""
+    """Collect repository status details for PR preparation.
+
+    Parameters
+    ----------
+    base : Optional[str], optional
+        Base branch to compare against. If None, uses upstream or defaults.
+
+    Returns
+    -------
+    Optional[RepoState]
+        Repository state snapshot, or None if not in a git repository.
+    """
 
     branch = git_output(["rev-parse", "--abbrev-ref", "HEAD"])
     if branch is None:
@@ -221,7 +316,18 @@ def inspect_repository(base: Optional[str] = None) -> Optional[RepoState]:
 
 
 def get_diff(diff_ref: str) -> str:
-    """Return diff between base reference and HEAD."""
+    """Return diff between base reference and HEAD.
+
+    Parameters
+    ----------
+    diff_ref : str
+        Base reference for comparison (e.g., branch name or commit).
+
+    Returns
+    -------
+    str
+        Git diff output, or empty string if no diff available.
+    """
 
     diff_output = git_output(["diff", f"{diff_ref}...HEAD"], strip=False)
     if diff_output is not None:
@@ -231,7 +337,25 @@ def get_diff(diff_ref: str) -> str:
 
 
 def generate_pr_description(diff: str, model_name: str) -> PRDescription:
-    """Use an LLM to craft a PR title and body."""
+    """Use an LLM to craft a PR title and body.
+
+    Parameters
+    ----------
+    diff : str
+        Git diff content to analyze for description generation.
+    model_name : str
+        Name of the LLM model to use for generation.
+
+    Returns
+    -------
+    PRDescription
+        Generated PR title and body.
+
+    Raises
+    ------
+    Exception
+        If LLM generation fails, returns a default description.
+    """
 
     if not diff.strip():
         return PRDescription(
@@ -290,7 +414,13 @@ Git Diff:
 
 
 def display_repo_state(state: RepoState) -> None:
-    """Render repository insights and best-practice checks."""
+    """Render repository insights and best-practice checks.
+
+    Parameters
+    ----------
+    state : RepoState
+        Repository state to display, including branch info and status.
+    """
 
     summary = Table(show_header=False, box=None)
     summary.add_column("Field", style="cyan")
@@ -352,7 +482,21 @@ def display_repo_state(state: RepoState) -> None:
         console.print(untracked_panel)
 
 class ReviewFocus(str, Enum):
-    """Types of review focus."""
+    """Enumeration of review focus areas.
+
+    Attributes
+    ----------
+    SECURITY : str
+        Focus on security issues.
+    PERFORMANCE : str
+        Focus on performance concerns.
+    TESTS : str
+        Focus on testing coverage and quality.
+    DOCS : str
+        Focus on documentation completeness.
+    GENERAL : str
+        General balanced review.
+    """
     SECURITY = "security"
     PERFORMANCE = "performance"
     TESTS = "tests"
@@ -362,7 +506,31 @@ class ReviewFocus(str, Enum):
 
 @dataclass
 class PullRequest:
-    """Pull request information."""
+    """Data class representing pull request information.
+
+    Attributes
+    ----------
+    number : int
+        Pull request number.
+    title : str
+        Pull request title.
+    author : str
+        Author login name.
+    base_branch : str
+        Base branch name.
+    head_branch : str
+        Head branch name.
+    repo : str
+        Repository name (owner/name).
+    additions : int
+        Number of added lines.
+    deletions : int
+        Number of deleted lines.
+    changed_files : int
+        Number of changed files.
+    draft : bool, optional
+        Whether the PR is a draft. Default is False.
+    """
     number: int
     title: str
     author: str
@@ -376,7 +544,14 @@ class PullRequest:
     
     @property
     def size_category(self) -> str:
-        """Categorize PR size."""
+        """Categorize the pull request size based on total changes.
+
+        Returns
+        -------
+        str
+            Size category: 'tiny' (<50 changes), 'small' (50-249),
+            'medium' (250-999), or 'large' (>=1000 changes).
+        """
         total = self.additions + self.deletions
         if total < 50:
             return "tiny"
@@ -390,7 +565,15 @@ class PullRequest:
 
 @dataclass
 class PRDescription:
-    """Auto-generated pull request description."""
+    """Data class for auto-generated pull request description.
+
+    Attributes
+    ----------
+    title : str
+        Generated PR title.
+    body : str
+        Generated PR body in Markdown format.
+    """
 
     title: str
     body: str
@@ -398,7 +581,31 @@ class PRDescription:
 
 @dataclass
 class RepoState:
-    """Snapshot of local repository state relevant to PR creation."""
+    """Data class representing a snapshot of local repository state.
+
+    Attributes
+    ----------
+    branch : str
+        Current branch name.
+    base_branch : str
+        Base branch for comparison.
+    diff_ref : str
+        Reference for diff calculation.
+    upstream : Optional[str]
+        Upstream branch if configured.
+    clean : bool
+        Whether working tree is clean.
+    ahead : int
+        Number of commits ahead of base.
+    behind : int
+        Number of commits behind base.
+    untracked : list[str]
+        List of untracked files.
+    commits : list[str]
+        Recent commits since base.
+    diff_stat : str
+        Git diff --stat output.
+    """
 
     branch: str
     base_branch: str
@@ -412,11 +619,20 @@ class RepoState:
     diff_stat: str
 
 class GitHubCLI:
-    """Wrapper for GitHub CLI operations."""
+    """Wrapper class for GitHub CLI operations.
+
+    Provides static methods to interact with GitHub via the gh CLI tool.
+    """
     
     @staticmethod
     def check_auth() -> bool:
-        """Check if gh CLI is authenticated."""
+        """Check if gh CLI is authenticated.
+
+        Returns
+        -------
+        bool
+            True if authenticated, False otherwise.
+        """
         try:
             result = sp.run(
                 ["gh", "auth", "status"],
@@ -442,7 +658,41 @@ class GitHubCLI:
         assignees: tuple[str, ...] = (),
         labels: tuple[str, ...] = (),
     ) -> dict[str, Any]:
-        """Create a pull request using gh CLI and return metadata."""
+        """Create a pull request using gh CLI and return metadata.
+
+        Parameters
+        ----------
+        title : Optional[str], optional
+            PR title. Default is None.
+        body : Optional[str], optional
+            PR body. Default is None.
+        base : Optional[str], optional
+            Base branch. Default is None.
+        head : Optional[str], optional
+            Head branch. Default is None.
+        draft : bool, optional
+            Create as draft. Default is False.
+        fill : bool, optional
+            Autofill title/body. Default is False.
+        repo : Optional[str], optional
+            Repository (owner/name). Default is None.
+        reviewers : tuple[str, ...], optional
+            Reviewers to assign. Default is empty tuple.
+        assignees : tuple[str, ...], optional
+            Assignees to assign. Default is empty tuple.
+        labels : tuple[str, ...], optional
+            Labels to apply. Default is empty tuple.
+
+        Returns
+        -------
+        dict[str, Any]
+            Metadata about the created PR, including number, url, etc.
+
+        Raises
+        ------
+        sp.CalledProcessError
+            If the gh command fails.
+        """
 
         def build_args(include_json: bool) -> list[str]:
             args = ["gh", "pr", "create"]
@@ -504,7 +754,20 @@ class GitHubCLI:
 
     @staticmethod
     def get_pr_info(pr_number: int, repo: Optional[str] = None) -> dict[str, Any]:
-        """Fetch PR information."""
+        """Fetch PR information.
+
+        Parameters
+        ----------
+        pr_number : int
+            Pull request number.
+        repo : Optional[str], optional
+            Repository (owner/name). Default is None.
+
+        Returns
+        -------
+        dict[str, Any]
+            PR information as returned by gh CLI.
+        """
         cmd = ["gh", "pr", "view", str(pr_number), "--json",
                "number,title,author,baseRefName,headRefName,additions,deletions,changedFiles,isDraft"]
         if repo:
@@ -515,7 +778,20 @@ class GitHubCLI:
     
     @staticmethod
     def get_pr_diff(pr_number: int, repo: Optional[str] = None) -> str:
-        """Fetch PR diff."""
+        """Fetch PR diff.
+
+        Parameters
+        ----------
+        pr_number : int
+            Pull request number.
+        repo : Optional[str], optional
+            Repository (owner/name). Default is None.
+
+        Returns
+        -------
+        str
+            The diff content as string.
+        """
         cmd = ["gh", "pr", "diff", str(pr_number)]
         if repo:
             cmd.extend(["--repo", repo])
@@ -525,7 +801,20 @@ class GitHubCLI:
     
     @staticmethod
     def get_pr_files(pr_number: int, repo: Optional[str] = None) -> list[str]:
-        """Get list of files changed in PR."""
+        """Get list of files changed in PR.
+
+        Parameters
+        ----------
+        pr_number : int
+            Pull request number.
+        repo : Optional[str], optional
+            Repository (owner/name). Default is None.
+
+        Returns
+        -------
+        list[str]
+            List of file paths changed in the PR.
+        """
         cmd = ["gh", "pr", "view", str(pr_number), "--json", "files"]
         if repo:
             cmd.extend(["--repo", repo])
@@ -536,7 +825,20 @@ class GitHubCLI:
     
     @staticmethod
     def list_prs_to_review(repo: Optional[str] = None, limit: int = 10) -> list[dict[str, Any]]:
-        """List PRs that need review."""
+        """List PRs that need review.
+
+        Parameters
+        ----------
+        repo : Optional[str], optional
+            Repository (owner/name). Default is None.
+        limit : int, optional
+            Maximum number of PRs to return. Default is 10.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            List of PR data dictionaries.
+        """
         cmd = ["gh", "pr", "list", "--json",
                "number,title,author,createdAt,isDraft", "--limit", str(limit)]
         if repo:
@@ -547,7 +849,17 @@ class GitHubCLI:
     
     @staticmethod
     def post_review_comment(pr_number: int, body: str, repo: Optional[str] = None) -> None:
-        """Post a review comment to PR."""
+        """Post a review comment to PR.
+
+        Parameters
+        ----------
+        pr_number : int
+            Pull request number.
+        body : str
+            Comment body in Markdown.
+        repo : Optional[str], optional
+            Repository (owner/name). Default is None.
+        """
         cmd = ["gh", "pr", "comment", str(pr_number), "--body", body]
         if repo:
             cmd.extend(["--repo", repo])
@@ -556,7 +868,18 @@ class GitHubCLI:
 
 
 def extract_pr_number(reference: str) -> Optional[int]:
-    """Extract a PR number from a string such as a URL."""
+    """Extract a PR number from a string such as a URL.
+
+    Parameters
+    ----------
+    reference : str
+        String containing PR reference, e.g., URL or number.
+
+    Returns
+    -------
+    Optional[int]
+        Extracted PR number, or None if not found.
+    """
     match = re.search(r"/(?:pull|compare)/(?P<num>\d+)", reference)
     if match:
         try:
@@ -573,7 +896,22 @@ def extract_pr_number(reference: str) -> Optional[int]:
 
 
 def build_review_prompt(pr: PullRequest, diff: str, focus: ReviewFocus) -> str:
-    """Build AI review prompt based on PR and focus area."""
+    """Build AI review prompt based on PR and focus area.
+
+    Parameters
+    ----------
+    pr : PullRequest
+        Pull request information.
+    diff : str
+        Git diff content.
+    focus : ReviewFocus
+        Review focus area.
+
+    Returns
+    -------
+    str
+        Formatted prompt for AI review.
+    """
     
     focus_prompts = {
         ReviewFocus.SECURITY: """
@@ -648,7 +986,18 @@ Here's the diff to review:
 
 
 def format_pr_table(prs: list[dict[str, Any]]) -> Table:
-    """Format PRs as a rich table."""
+    """Format PRs as a rich table.
+
+    Parameters
+    ----------
+    prs : list[dict[str, Any]]
+        List of PR data dictionaries.
+
+    Returns
+    -------
+    Table
+        Rich table object for display.
+    """
     table = Table(title="Pull Requests Needing Review")
     table.add_column("PR", style="cyan", no_wrap=True)
     table.add_column("Title", style="white")
@@ -682,7 +1031,17 @@ def prepare(
         help="LLM model to use for description generation",
     ),
 ) -> None:
-    """Inspect local repository state before creating a PR."""
+    """Inspect local repository state before creating a PR.
+
+    Parameters
+    ----------
+    base : Optional[str], optional
+        Base branch to compare against.
+    describe : bool, optional
+        Generate AI-assisted PR title and body.
+    model : str, optional
+        LLM model for description generation.
+    """
 
     state = inspect_repository(base)
     if state is None:
@@ -764,7 +1123,27 @@ def create(
         help="Show diff before review when --run-review is used",
     ),
 ) -> None:
-    """Create a pull request using the GitHub CLI."""
+    """Create a pull request using the GitHub CLI.
+
+    Parameters
+    ----------
+    title : Optional[str], optional
+        PR title.
+    body : Optional[str], optional
+        PR body.
+    base : Optional[str], optional
+        Base branch.
+    head : Optional[str], optional
+        Head branch.
+    draft : bool, optional
+        Create as draft.
+    repo : Optional[str], optional
+        Repository (owner/name).
+    describe : bool, optional
+        Use AI to generate title/body.
+    model : str, optional
+        Model for AI generation.
+    """
 
     if not GitHubCLI.check_auth():
         console.print("[red]Error:[/red] gh CLI not found or not authenticated")
@@ -947,7 +1326,23 @@ def review(
     post: bool = typer.Option(False, "--post", "-p", help="Post review as GitHub comment"),
     show_diff: bool = typer.Option(False, "--show-diff", help="Show the diff before review"),
 ) -> None:
-    """Review a GitHub pull request using AI."""
+    """Review a GitHub pull request using AI.
+
+    Parameters
+    ----------
+    pr_number : int
+        PR number to review.
+    repo : Optional[str], optional
+        Repository (owner/name).
+    focus : ReviewFocus, optional
+        Review focus area.
+    model : str, optional
+        LLM model to use.
+    post : bool, optional
+        Post review as GitHub comment.
+    show_diff : bool, optional
+        Show diff before review.
+    """
     
     # Check gh CLI authentication
     if not GitHubCLI.check_auth():
@@ -1029,7 +1424,15 @@ def check(
     repo: Optional[str] = typer.Option(None, "--repo", "-r", help="Repository (owner/name)"),
     limit: int = typer.Option(10, "--limit", "-l", help="Number of PRs to show"),
 ) -> None:
-    """Check for pull requests needing review."""
+    """Check for pull requests needing review.
+
+    Parameters
+    ----------
+    repo : Optional[str], optional
+        Repository (owner/name).
+    limit : int, optional
+        Number of PRs to show.
+    """
     
     if not GitHubCLI.check_auth():
         console.print("[red]Error:[/red] gh CLI not found or not authenticated")
@@ -1055,7 +1458,10 @@ def check(
 
 @app.command()
 def models() -> None:
-    """List available AI models."""
+    """List available AI models.
+
+    Displays a table of installed LLM models and their providers.
+    """
     models = llm.get_models()
     if not models:
         console.print("[yellow]No models found. Install LLM plugins first.[/yellow]")
