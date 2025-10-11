@@ -412,30 +412,50 @@ class GitHubCLI:
     ) -> dict[str, Any]:
         """Create a pull request using gh CLI and return metadata."""
 
-        cmd = ["gh", "pr", "create", "--json", "number,url"]
+        def build_args(include_json: bool) -> list[str]:
+            args = ["gh", "pr", "create"]
+            if include_json:
+                args.extend(["--json", "number,url"])
+            if repo:
+                args.extend(["--repo", repo])
+            if base:
+                args.extend(["--base", base])
+            if head:
+                args.extend(["--head", head])
+            if title:
+                args.extend(["--title", title])
+            if body:
+                args.extend(["--body", body])
+            if draft:
+                args.append("--draft")
+            if fill:
+                args.append("--fill")
+            for reviewer in reviewers:
+                args.extend(["--reviewer", reviewer])
+            for assignee in assignees:
+                args.extend(["--assignee", assignee])
+            for label in labels:
+                args.extend(["--label", label])
+            return args
 
-        if repo:
-            cmd.extend(["--repo", repo])
-        if base:
-            cmd.extend(["--base", base])
-        if head:
-            cmd.extend(["--head", head])
-        if title:
-            cmd.extend(["--title", title])
-        if body:
-            cmd.extend(["--body", body])
-        if draft:
-            cmd.append("--draft")
-        if fill:
-            cmd.append("--fill")
-        for reviewer in reviewers:
-            cmd.extend(["--reviewer", reviewer])
-        for assignee in assignees:
-            cmd.extend(["--assignee", assignee])
-        for label in labels:
-            cmd.extend(["--label", label])
-
+        cmd = build_args(include_json=True)
         result = sp.run(cmd, capture_output=True, text=True, check=False)
+
+        if result.returncode != 0 and result.stderr:
+            stderr_lower = result.stderr.lower()
+            if "--json" in stderr_lower and ("unknown flag" in stderr_lower or "flag provided but not defined" in stderr_lower):
+                # Retry without --json (older gh release)
+                cmd = build_args(include_json=False)
+                legacy = sp.run(cmd, capture_output=True, text=True, check=False)
+                if legacy.returncode != 0:
+                    raise sp.CalledProcessError(
+                        legacy.returncode,
+                        cmd,
+                        output=legacy.stdout,
+                        stderr=legacy.stderr,
+                    )
+                output_text = (legacy.stdout or legacy.stderr or "").strip()
+                return {"output": output_text}
 
         if result.returncode != 0:
             raise sp.CalledProcessError(
