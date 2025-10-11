@@ -180,18 +180,16 @@ class CommitWorkflowApp(App[Any | None]):
         # Build file inventory
         self._file_status: dict[str, str] = {}
         self._all_files: list[str] = []
-        for path in repo_status.staged:
-            if path not in self._file_status:
-                self._file_status[path] = "staged"
-                self._all_files.append(path)
-        for path in repo_status.unstaged:
-            if path not in self._file_status:
-                self._file_status[path] = "unstaged"
-                self._all_files.append(path)
-        for path in repo_status.untracked:
-            if path not in self._file_status:
-                self._file_status[path] = "untracked"
-                self._all_files.append(path)
+        file_sources = [
+            (repo_status.staged, "staged"),
+            (repo_status.unstaged, "unstaged"),
+            (repo_status.untracked, "untracked"),
+        ]
+        for files, status in file_sources:
+            for path in files:
+                if path not in self._file_status:
+                    self._file_status[path] = status
+                    self._all_files.append(path)
 
         self._assignment: dict[str, Optional[int]] = {
             path: None for path in self._all_files
