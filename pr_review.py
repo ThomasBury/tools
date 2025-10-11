@@ -864,8 +864,8 @@ def create(
             console.print("[yellow]Pull request creation cancelled.[/yellow]")
             raise typer.Exit()
 
-    try:
-        result = GitHubCLI.create_pr(
+    def attempt_create(current_state: RepoState) -> dict[str, Any]:
+        return GitHubCLI.create_pr(
             title=title,
             body=body,
             base=base,
@@ -877,13 +877,28 @@ def create(
             assignees=tuple(assignee),
             labels=tuple(label),
         )
+
+    try:
+        result = attempt_create(state)
     except sp.CalledProcessError as exc:
-        console.print("[red]Failed to create pull request via gh CLI.[/red]")
-        if exc.stderr:
-            console.print(exc.stderr.strip())
-        elif exc.output:
-            console.print(exc.output.strip())
-        raise typer.Exit(1)
+        message = (exc.stderr or exc.output or "").lower()
+        if "must first push" in message:
+            console.print("[yellow]Branch not pushed. Attempting to push before retrying...[/yellow]")
+            push_branch_if_needed(state)
+            state = inspect_repository(base)
+            if state is None:
+                console.print("[red]Error:[/red] Unable to inspect repository after push.")
+                raise typer.Exit(1)
+            try:
+                result = attempt_create(state)
+            except sp.CalledProcessError as retry_exc:
+                console.print("[red]Failed to create pull request via gh CLI.[/red]")
+                console.print((retry_exc.stderr or retry_exc.output or "").strip())
+                raise typer.Exit(1)
+        else:
+            console.print("[red]Failed to create pull request via gh CLI.[/red]")
+            console.print((exc.stderr or exc.output or "").strip())
+            raise typer.Exit(1)
 
     pr_url = result.get("url")
     pr_number = result.get("number")
