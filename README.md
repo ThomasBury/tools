@@ -75,6 +75,8 @@ AI-powered pull request reviewer that integrates with GitHub CLI.
 # Create a PR from the current branch (auto-filled title/body)
 ./pr_review.py create --fill
 
+# During creation you'll be prompted to choose the base branch (e.g. main)
+
 # Create a PR and immediately run the AI review
 ./pr_review.py create --fill --run-review --focus tests
 

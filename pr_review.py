@@ -71,6 +71,56 @@ def git_output(args: list[str], *, strip: bool = True) -> Optional[str]:
     return result.stdout.strip() if strip else result.stdout
 
 
+def list_local_branches() -> list[str]:
+    output = git_output(["for-each-ref", "--format=%(refname:short)", "refs/heads"], strip=False)
+    if not output:
+        return []
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def prompt_for_base_branch(initial: RepoState) -> tuple[str, RepoState]:
+    """Prompt the user to choose the base branch for the PR."""
+
+    default_base = initial.base_branch or "main"
+    candidates = list(dict.fromkeys([
+        default_base,
+        "main",
+        "develop",
+        *list_local_branches(),
+    ]))
+
+    console.print("\n[bold]Select a base branch to merge into.[/bold]")
+    for idx, branch in enumerate(candidates, start=1):
+        marker = "(default)" if branch == default_base else ""
+        console.print(f"  [cyan]{idx}[/cyan]. {branch} {marker}")
+
+    value = typer.prompt(
+        "Enter branch name or number",
+        default=default_base,
+    ).strip()
+
+    selected: str
+    if value.isdigit():
+        index = int(value) - 1
+        if 0 <= index < len(candidates):
+            selected = candidates[index]
+        else:
+            selected = default_base
+    else:
+        selected = value
+
+    if selected.startswith("origin/"):
+        selected = selected.split("/", 1)[1]
+
+    refreshed_state = inspect_repository(selected)
+    if refreshed_state is None:
+        console.print(
+            f"[yellow]Falling back to current branch comparison; unable to inspect '{selected}'.[/yellow]"
+        )
+        refreshed_state = initial
+    return selected, refreshed_state
+
+
 def resolve_base_reference(explicit_base: Optional[str]) -> tuple[str, str, Optional[str]]:
     """Determine the base branch and diff reference for comparisons."""
 
@@ -682,6 +732,15 @@ def create(
     if state is None:
         console.print("[red]Error:[/red] Not inside a git repository or HEAD is detached.")
         raise typer.Exit(1)
+
+    if base is None:
+        base, state = prompt_for_base_branch(state)
+    else:
+        base = base.strip()
+        if base and base != state.base_branch:
+            refreshed = inspect_repository(base)
+            if refreshed:
+                state = refreshed
 
     display_repo_state(state)
 
