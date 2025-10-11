@@ -59,6 +59,8 @@ AI-powered pull request reviewer that integrates with GitHub CLI.
 
 **Features:**
 
+- Pre-flight branch checklist and AI-authored PR descriptions
+- Creates pull requests via the GitHub CLI
 - Fetches PR diffs using `gh` CLI
 - Provides focused reviews (security, performance, testing, etc.)
 - Posts reviews back to GitHub
@@ -67,6 +69,17 @@ AI-powered pull request reviewer that integrates with GitHub CLI.
 **Usage:**
 
 ```bash
+# Check branch readiness and draft a PR body
+./pr_review.py prepare --describe
+
+# Create a PR from the current branch (auto-filled title/body)
+./pr_review.py create --fill
+
+# During creation you'll be prompted to choose the base branch (e.g. main)
+
+# Create a PR and immediately run the AI review
+./pr_review.py create --fill --run-review --focus tests
+
 # Review a PR in the current repo
 ./pr_review.py review 123
 

@@ -11,19 +11,44 @@
 # ]
 # ///
 """
-code-review: Lightweight AI-powered code reviewer.
+Lightweight AI-powered code reviewer.
 
-Features:
-- Quick code reviews using AI (supports multiple models via llm)
-- Analyzes Python files for bugs, style, security, and best practices
-- Context-aware reviews using project structure
-- Supports .gitignore patterns
-- Beautiful terminal output with syntax highlighting
+This module provides a command-line tool for reviewing Python code using AI models.
+It analyzes Python files for bugs, style, security, best practices, and performance,
+with support for different review focuses. The tool is context-aware, respects
+.gitignore patterns, and provides beautiful terminal output with syntax highlighting.
 
-Usage:
-    ./code_review.py review file.py      # Review a single file
-    ./code_review.py review src/          # Review all Python files in directory
-    ./code_review.py review . --focus security  # Security-focused review
+Features
+--------
+- AI-powered code reviews using multiple LLM models via the llm library
+- Multiple review focuses: general, security, performance, testing, style
+- Context-aware reviews using project structure (pyproject.toml, README)
+- Automatic detection and exclusion of files via .gitignore
+- Syntax-highlighted code display in terminal
+- Support for reviewing single files or entire directories
+- Configurable file size limits and maximum files to review
+
+Examples
+--------
+Review a single Python file:
+
+>>> ./code_review.py review main.py
+
+Review all Python files in a directory:
+
+>>> ./code_review.py review src/
+
+Perform a security-focused review:
+
+>>> ./code_review.py review . --focus security
+
+Quick review of a single file with minimal output:
+
+>>> ./code_review.py quick utils.py
+
+List available AI models:
+
+>>> ./code_review.py models
 """
 
 from __future__ import annotations
@@ -717,7 +742,54 @@ def review(
     max_files: int = typer.Option(10, "--max-files", help="Maximum files to review"),
     show_code: bool = typer.Option(False, "--show-code", "-s", help="Show code snippets in terminal"),
 ) -> None:
-    """Review Python code with AI assistance."""
+    """
+    Review Python code with AI assistance.
+
+    This command analyzes Python files using an AI model to provide comprehensive
+    code reviews. It supports different focus areas and can review single files
+    or entire directories. The review includes project context, file statistics,
+    and formatted AI feedback.
+
+    Parameters
+    ----------
+    path : Path
+        File or directory path to review. Must exist.
+    focus : ReviewFocus, optional
+        Review focus area (general, security, performance, testing, style).
+        Default is ReviewFocus.GENERAL.
+    model : str, optional
+        LLM model identifier to use for the review. Default is DEFAULT_MODEL.
+    max_files : int, optional
+        Maximum number of files to review. Default is 10.
+    show_code : bool, optional
+        Whether to display code snippets in the terminal. Default is False.
+
+    Returns
+    -------
+    None
+        This function does not return a value. It prints the review results
+        to the console and exits.
+
+    Raises
+    ------
+    typer.Exit
+        If the path does not exist, no Python files are found, or an error
+        occurs during the review process.
+
+    Examples
+    --------
+    Review a single file with default settings:
+
+    >>> review(Path("main.py"))
+
+    Review a directory with security focus:
+
+    >>> review(Path("src"), focus=ReviewFocus.SECURITY)
+
+    Review with custom model and show code:
+
+    >>> review(Path("."), model="gpt-4", show_code=True)
+    """
 
     console.print(f"Debug: path={path}, exists={path.exists()}, cwd={Path.cwd()}")
 
@@ -784,7 +856,40 @@ def quick(
     path: Path = typer.Argument(..., help="File to quickly review"),
     model: str = typer.Option(DEFAULT_MODEL, "--model", "-m", help="LLM model"),
 ) -> None:
-    """Quick review of a single file with minimal output."""
+    """
+    Quick review of a single file with minimal output.
+
+    This command performs a fast, focused review of a single Python file using
+    an AI model. It prioritizes critical issues like bugs, security problems,
+    and major performance issues, providing brief and actionable feedback.
+
+    Parameters
+    ----------
+    path : Path
+        Path to the Python file to review. Must be a valid file.
+    model : str, optional
+        LLM model identifier to use. Default is DEFAULT_MODEL.
+
+    Returns
+    -------
+    None
+        Prints the quick review results to the console.
+
+    Raises
+    ------
+    typer.Exit
+        If the path is invalid, not a file, or cannot be read.
+
+    Examples
+    --------
+    Quick review of a file with default model:
+
+    >>> quick(Path("utils.py"))
+
+    Quick review with custom model:
+
+    >>> quick(Path("main.py"), model="claude-3")
+    """
     
     if not path.exists() or not path.is_file():
         console.print(f"[red]Error:[/red] '{path}' is not a valid file")
@@ -844,7 +949,7 @@ def models() -> None:
     --------
     >>> models()
     """
-    models: list[MockModel] = llm.get_models()
+    models = llm.get_models()
     if not models:
         console.print("[yellow]No models found. Install LLM plugins first.[/yellow]")
         console.print("Example: uv tool install llm-gemini")

@@ -10,21 +10,40 @@
 # ]
 # ///
 """
-dev-assist: Smart development assistant for Python projects.
+Smart development assistant for Python projects.
 
-Automates common development workflows:
+This module provides a command-line interface for automating common Python
+development workflows. It integrates with modern tools like uv for dependency
+management, git for version control, and various quality assurance tools.
+
+Features
+--------
 - Project initialization with modern Python tooling (uv)
 - Dependency management and updates
 - Git operations and conventional commits
-- Test running with coverage
-- Pre-commit setup and checks
-- Quick fixes for common issues
+- Test running with coverage analysis
+- Pre-commit setup and automated checks
+- Quick fixes for common code quality issues
 
-Usage:
-    ./dev_assist.py init my-project  # Create new project
-    ./dev_assist.py deps add httpx   # Add dependency
-    ./dev_assist.py test             # Run tests with coverage
-    ./dev_assist.py commit feat      # Interactive commit helper
+Notes
+-----
+The tool is designed to work with uv-managed Python projects and follows
+modern Python development best practices. All commands are implemented as
+Typer applications with Rich-formatted output for better user experience.
+
+Examples
+--------
+Initialize a new project:
+    ./dev_assist.py init my-project
+
+Add a dependency:
+    ./dev_assist.py deps add httpx
+
+Run tests with coverage:
+    ./dev_assist.py test
+
+Create an interactive conventional commit:
+    ./dev_assist.py commit feat
 """
 
 from __future__ import annotations
@@ -57,7 +76,27 @@ console = Console()
 
 
 class CommitType(str, Enum):
-    """Conventional commit types."""
+    """Enumeration of conventional commit types.
+
+    This enum defines the standard commit types used in conventional commits,
+    following the Angular commit message format. Each type indicates the kind
+    of change being made to the codebase.
+
+    Notes
+    -----
+    Conventional commits provide a standardized format for commit messages,
+    making it easier to understand the nature of changes and automate
+    version management and changelog generation.
+
+    Examples
+    --------
+    >>> commit_type = CommitType.FEAT
+    >>> str(commit_type)
+    'feat'
+
+    >>> CommitType.FIX in CommitType
+    True
+    """
     FEAT = "feat"       # New feature
     FIX = "fix"         # Bug fix
     DOCS = "docs"       # Documentation only
@@ -72,7 +111,53 @@ class CommitType(str, Enum):
 
 @dataclass
 class ProjectInfo:
-    """Project information."""
+    """Container for project metadata and configuration information.
+
+    This dataclass holds information about a Python project's current state,
+    including its configuration, dependencies, and development environment setup.
+    It's used throughout the dev-assist tool to make decisions about project
+    management operations.
+
+    Attributes
+    ----------
+    name : str
+        The project name, typically derived from pyproject.toml or directory name.
+    path : Path
+        Absolute path to the project root directory.
+    has_git : bool
+        True if the project is a git repository.
+    has_pyproject : bool
+        True if pyproject.toml exists in the project root.
+    has_tests : bool
+        True if a tests or test directory exists.
+    python_version : str
+        Required Python version (e.g., "3.11"), parsed from pyproject.toml.
+    dependencies : list[str]
+        List of production dependencies from pyproject.toml.
+    dev_dependencies : list[str]
+        List of development dependencies from pyproject.toml.
+
+    Notes
+    -----
+    This information is gathered by scanning the project directory and parsing
+    configuration files. It's used to determine what operations are available
+    and how to execute them safely.
+
+    Examples
+    --------
+    >>> info = ProjectInfo(
+    ...     name="my-project",
+    ...     path=Path("/path/to/project"),
+    ...     has_git=True,
+    ...     has_pyproject=True,
+    ...     has_tests=True,
+    ...     python_version="3.11",
+    ...     dependencies=["requests"],
+    ...     dev_dependencies=["pytest"]
+    ... )
+    >>> info.name
+    'my-project'
+    """
     name: str
     path: Path
     has_git: bool
@@ -84,11 +169,41 @@ class ProjectInfo:
 
 
 class UVManager:
-    """Manage uv operations."""
+    """Static utility class for managing uv package manager operations.
+
+    This class provides a high-level interface to uv commands for project
+    initialization, dependency management, and command execution. All methods
+    are static and handle subprocess calls to uv with appropriate error handling.
+
+    Notes
+    -----
+    uv is a fast Python package manager written in Rust. This class abstracts
+    common uv operations used in Python project development workflows.
+
+    Examples
+    --------
+    >>> UVManager.check_installed()
+    True
+
+    >>> path = UVManager.init_project("my-project", "3.11")
+    >>> str(path)
+    'my-project'
+    """
     
     @staticmethod
     def check_installed() -> bool:
-        """Check if uv is installed."""
+        """Check if uv package manager is installed and accessible.
+
+        Returns
+        -------
+        bool
+            True if uv is installed and can be executed, False otherwise.
+
+        Examples
+        --------
+        >>> UVManager.check_installed()
+        True
+        """
         try:
             sp.run(["uv", "--version"], capture_output=True, check=True)
             return True
@@ -97,31 +212,94 @@ class UVManager:
     
     @staticmethod
     def init_project(name: str, python_version: Optional[str] = None) -> Path:
-        """Initialize a new uv project."""
+        """Initialize a new uv project with optional Python version specification.
+
+        Parameters
+        ----------
+        name : str
+            Name of the project directory to create.
+        python_version : str, optional
+            Python version to use for the project (e.g., "3.11").
+
+        Returns
+        -------
+        Path
+            Path to the created project directory.
+
+        Raises
+        ------
+        subprocess.CalledProcessError
+            If uv init command fails.
+
+        Examples
+        --------
+        >>> path = UVManager.init_project("my-app", "3.11")
+        >>> path.name
+        'my-app'
+        """
         cmd = ["uv", "init", name]
         if python_version:
             cmd.extend(["--python", python_version])
-        
+
         sp.run(cmd, check=True)
         return Path(name)
     
     @staticmethod
     def add_dependency(package: str, dev: bool = False, extras: Optional[list[str]] = None) -> None:
-        """Add a dependency to the project."""
+        """Add a dependency to the current uv project.
+
+        Parameters
+        ----------
+        package : str
+            Package name to add, optionally with version specifier.
+        dev : bool, default False
+            If True, add as a development dependency.
+        extras : list[str], optional
+            List of package extras to include (e.g., ["test", "docs"]).
+
+        Raises
+        ------
+        subprocess.CalledProcessError
+            If uv add command fails.
+
+        Examples
+        --------
+        >>> UVManager.add_dependency("requests>=2.0")
+        >>> UVManager.add_dependency("pytest", dev=True)
+        >>> UVManager.add_dependency("fastapi", extras=["all"])
+        """
         cmd = ["uv", "add"]
-        
+
         if dev:
             cmd.append("--dev")
-        
+
         if extras:
             package = f"{package}[{','.join(extras)}]"
-        
+
         cmd.append(package)
         sp.run(cmd, check=True)
     
     @staticmethod
     def remove_dependency(package: str, dev: bool = False) -> None:
-        """Remove a dependency."""
+        """Remove a dependency from the current uv project.
+
+        Parameters
+        ----------
+        package : str
+            Name of the package to remove.
+        dev : bool, default False
+            If True, remove from development dependencies.
+
+        Raises
+        ------
+        subprocess.CalledProcessError
+            If uv remove command fails.
+
+        Examples
+        --------
+        >>> UVManager.remove_dependency("requests")
+        >>> UVManager.remove_dependency("pytest", dev=True)
+        """
         cmd = ["uv", "remove"]
         if dev:
             cmd.append("--dev")
@@ -130,17 +308,68 @@ class UVManager:
     
     @staticmethod
     def sync_dependencies() -> None:
-        """Sync dependencies from pyproject.toml."""
+        """Synchronize project dependencies from pyproject.toml.
+
+        Installs or removes packages to match the current pyproject.toml
+        dependency specifications.
+
+        Raises
+        ------
+        subprocess.CalledProcessError
+            If uv sync command fails.
+
+        Examples
+        --------
+        >>> UVManager.sync_dependencies()
+        """
         sp.run(["uv", "sync"], check=True)
     
     @staticmethod
     def run_command(command: list[str]) -> sp.CompletedProcess:
-        """Run a command in the uv environment."""
+        """Execute a command within the uv-managed virtual environment.
+
+        Parameters
+        ----------
+        command : list[str]
+            Command and arguments to execute.
+
+        Returns
+        -------
+        subprocess.CompletedProcess
+            Result of the command execution with stdout, stderr, and returncode.
+
+        Examples
+        --------
+        >>> result = UVManager.run_command(["python", "--version"])
+        >>> result.returncode
+        0
+        """
         return sp.run(["uv", "run"] + command, capture_output=True, text=True)
     
     @staticmethod
     def update_dependencies(packages: Optional[list[str]] = None) -> None:
-        """Update dependencies."""
+        """Update project dependencies to their latest compatible versions.
+
+        Parameters
+        ----------
+        packages : list[str], optional
+            Specific packages to update. If None, updates all dependencies.
+
+        Raises
+        ------
+        subprocess.CalledProcessError
+            If uv lock or sync commands fail.
+
+        Notes
+        -----
+        This method first updates the lock file with new versions, then syncs
+        the environment to install the updated packages.
+
+        Examples
+        --------
+        >>> UVManager.update_dependencies()  # Update all
+        >>> UVManager.update_dependencies(["requests", "click"])  # Update specific
+        """
         cmd = ["uv", "lock", "--upgrade"]
         if packages:
             for pkg in packages:
@@ -150,16 +379,72 @@ class UVManager:
 
 
 class GitManager:
-    """Manage git operations."""
+    """Static utility class for managing git repository operations.
+
+    This class provides a high-level interface to common git operations
+    used in development workflows, including repository initialization,
+    staging files, committing changes, and status checking.
+
+    Notes
+    -----
+    Uses the GitPython library to interact with git repositories.
+    All operations are performed on the current working directory's repository
+    unless a specific path is provided.
+
+    Examples
+    --------
+    >>> repo = GitManager.init_repo(Path("my-project"))
+    >>> GitManager.stage_files(repo, ["*.py"])
+    ['file1.py', 'file2.py']
+    """
     
     @staticmethod
     def init_repo(path: Path) -> Repo:
-        """Initialize a git repository."""
+        """Initialize a new git repository at the specified path.
+
+        Parameters
+        ----------
+        path : Path
+            Directory path where the git repository should be initialized.
+
+        Returns
+        -------
+        Repo
+            GitPython Repo object for the initialized repository.
+
+        Examples
+        --------
+        >>> from pathlib import Path
+        >>> repo = GitManager.init_repo(Path("my-project"))
+        >>> repo.git_dir
+        'my-project/.git'
+        """
         return Repo.init(path)
     
     @staticmethod
     def get_repo(path: Path = Path.cwd()) -> Optional[Repo]:
-        """Get existing repo or None."""
+        """Get the git repository object for a given path.
+
+        Parameters
+        ----------
+        path : Path, default Path.cwd()
+            Directory path to search for a git repository.
+
+        Returns
+        -------
+        Repo or None
+            GitPython Repo object if a repository is found, None otherwise.
+
+        Notes
+        -----
+        Searches parent directories if no repository is found in the given path.
+
+        Examples
+        --------
+        >>> repo = GitManager.get_repo()
+        >>> if repo:
+        ...     print("In a git repository")
+        """
         try:
             return Repo(path, search_parent_directories=True)
         except:
@@ -167,7 +452,25 @@ class GitManager:
     
     @staticmethod
     def stage_files(repo: Repo, patterns: list[str]) -> list[str]:
-        """Stage files matching patterns."""
+        """Stage files in the repository that match given patterns.
+
+        Parameters
+        ----------
+        repo : Repo
+            GitPython repository object.
+        patterns : list[str]
+            List of file patterns to stage. Use "." to stage all files.
+
+        Returns
+        -------
+        list[str]
+            List of staged file paths or descriptions.
+
+        Examples
+        --------
+        >>> staged = GitManager.stage_files(repo, ["*.py", "README.md"])
+        >>> print(f"Staged {len(staged)} files")
+        """
         staged = []
         for pattern in patterns:
             if pattern == ".":
@@ -182,35 +485,98 @@ class GitManager:
     
     @staticmethod
     def commit(repo: Repo, message: str) -> str:
-        """Create a commit."""
+        """Create a commit with the given message.
+
+        Parameters
+        ----------
+        repo : Repo
+            GitPython repository object.
+        message : str
+            Commit message.
+
+        Returns
+        -------
+        str
+            Hexadecimal SHA hash of the created commit.
+
+        Examples
+        --------
+        >>> sha = GitManager.commit(repo, "Add new feature")
+        >>> print(f"Committed: {sha[:8]}")
+        """
         return repo.index.commit(message).hexsha
     
     @staticmethod
     def get_status(repo: Repo) -> dict[str, list[str]]:
-        """Get repository status."""
+        """Get the current status of the git repository.
+
+        Parameters
+        ----------
+        repo : Repo
+            GitPython repository object.
+
+        Returns
+        -------
+        dict[str, list[str]]
+            Dictionary with keys 'modified', 'added', 'deleted', 'untracked'
+            containing lists of file paths for each status type.
+
+        Examples
+        --------
+        >>> status = GitManager.get_status(repo)
+        >>> print(f"Modified files: {len(status['modified'])}")
+        >>> print(f"Untracked files: {len(status['untracked'])}")
+        """
         status = {
             "modified": [],
             "added": [],
             "deleted": [],
             "untracked": []
         }
-        
+
         for item in repo.index.diff(None):
             status["modified"].append(item.a_path)
-        
+
         for item in repo.index.diff("HEAD"):
             if item.change_type == "A":
                 status["added"].append(item.a_path)
             elif item.change_type == "D":
                 status["deleted"].append(item.a_path)
-        
+
         status["untracked"] = repo.untracked_files
-        
+
         return status
 
 
 def get_project_info(path: Path = Path.cwd()) -> ProjectInfo:
-    """Gather project information."""
+    """Gather comprehensive information about a Python project.
+
+    Scans the project directory and parses configuration files to collect
+    metadata about the project's current state, dependencies, and setup.
+
+    Parameters
+    ----------
+    path : Path, default Path.cwd()
+        Root directory of the project to analyze.
+
+    Returns
+    -------
+    ProjectInfo
+        Dataclass containing project metadata including name, paths,
+        git status, configuration presence, and dependency lists.
+
+    Notes
+    -----
+    This function reads pyproject.toml to extract project name, dependencies,
+    and Python version requirements. It also checks for the presence of
+    common project files and directories.
+
+    Examples
+    --------
+    >>> info = get_project_info()
+    >>> print(f"Project: {info.name}")
+    >>> print(f"Has tests: {info.has_tests}")
+    """
     pyproject_path = path / "pyproject.toml"
     
     # Default values
@@ -255,7 +621,30 @@ def get_project_info(path: Path = Path.cwd()) -> ProjectInfo:
 
 
 def create_default_files(project_path: Path, project_name: str) -> None:
-    """Create default project files."""
+    """Create a standard set of default files for a new Python project.
+
+    Generates a basic project structure including source directory, main module,
+    test suite, documentation, and common configuration files.
+
+    Parameters
+    ----------
+    project_path : Path
+        Root directory of the project where files will be created.
+    project_name : str
+        Name of the project, used for module naming and documentation.
+
+    Notes
+    -----
+    Creates the following structure:
+    - Source package directory with __init__.py and main.py
+    - tests/ directory with test_main.py
+    - README.md with basic project documentation
+    - .gitignore with common Python exclusions
+
+    Examples
+    --------
+    >>> create_default_files(Path("my-app"), "my_app")
+    """
     
     # Create source directory
     src_dir = project_path / project_name.replace("-", "_")
@@ -396,7 +785,45 @@ def init(
     with_git: bool = typer.Option(True, "--git/--no-git", help="Initialize git repository"),
     dev_packages: list[str] = typer.Option([], "--dev", "-d", help="Dev dependencies to add"),
 ) -> None:
-    """Initialize a new Python project with modern tooling."""
+    """Initialize a new Python project with modern tooling and best practices.
+
+    Creates a complete project structure using uv for dependency management,
+    sets up testing, linting, and formatting tools, and optionally initializes
+    a git repository with an initial commit.
+
+    Parameters
+    ----------
+    name : str
+        Name of the project to create.
+    python_version : str, optional
+        Python version to use (e.g., "3.11").
+    with_git : bool, default True
+        Whether to initialize a git repository.
+    dev_packages : list[str], default []
+        Additional development dependencies to install.
+
+    Raises
+    ------
+    typer.Exit
+        If uv is not installed or project directory already exists.
+
+    Notes
+    -----
+    This command performs the following steps:
+    1. Validates uv installation
+    2. Creates project directory with uv init
+    3. Generates default project files
+    4. Installs common development tools (pytest, ruff, mypy)
+    5. Optionally initializes git repository
+
+    Examples
+    --------
+    Create a basic project:
+    >>> init("my-project")
+
+    Create with specific Python version and extra dev tools:
+    >>> init("my-project", python_version="3.11", dev_packages=["black", "isort"])
+    """
     
     if not UVManager.check_installed():
         console.print("[red]Error:[/red] uv is not installed")
@@ -458,7 +885,47 @@ def deps(
     dev: bool = typer.Option(False, "--dev", "-d", help="Dev dependency"),
     extras: list[str] = typer.Option([], "--extra", "-e", help="Package extras"),
 ) -> None:
-    """Manage project dependencies."""
+    """Manage project dependencies using uv package manager.
+
+    Provides a unified interface for adding, removing, updating, and listing
+    project dependencies. Supports both production and development dependencies.
+
+    Parameters
+    ----------
+    action : str
+        Action to perform: "add", "remove", "update", or "list".
+    packages : list[str], optional
+        Package names for add/remove/update actions.
+    dev : bool, default False
+        Whether to operate on development dependencies.
+    extras : list[str], default []
+        Package extras to include when adding dependencies.
+
+    Raises
+    ------
+    typer.Exit
+        If uv is not installed, pyproject.toml is missing, or invalid action/packages.
+
+    Notes
+    -----
+    - Requires pyproject.toml to be present in the current directory
+    - Uses uv for all dependency operations
+    - Displays dependency list in a formatted table
+
+    Examples
+    --------
+    Add production dependency:
+    >>> deps("add", ["requests"])
+
+    Add development dependency with extras:
+    >>> deps("add", ["pytest"], dev=True, extras=["cov"])
+
+    Update all dependencies:
+    >>> deps("update")
+
+    List all dependencies:
+    >>> deps("list")
+    """
     
     if not UVManager.check_installed():
         console.print("[red]Error:[/red] uv is not installed")
@@ -519,7 +986,42 @@ def test(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
     file: Optional[str] = typer.Option(None, "--file", "-f", help="Specific test file"),
 ) -> None:
-    """Run tests with optional coverage."""
+    """Run project tests using pytest with optional coverage reporting.
+
+    Executes the test suite and provides formatted output. Supports running
+    all tests or specific test files, with optional coverage analysis.
+
+    Parameters
+    ----------
+    coverage : bool, default True
+        Whether to run tests with coverage analysis.
+    verbose : bool, default False
+        Enable verbose pytest output.
+    file : str, optional
+        Path to specific test file to run.
+
+    Raises
+    ------
+    typer.Exit
+        If no tests directory is found or tests fail.
+
+    Notes
+    -----
+    - Looks for tests/ or test/ directory
+    - Uses pytest as the test runner
+    - Coverage reports show missing lines when enabled
+
+    Examples
+    --------
+    Run all tests with coverage:
+    >>> test()
+
+    Run specific test file verbosely:
+    >>> test(file="tests/test_main.py", verbose=True)
+
+    Run tests without coverage:
+    >>> test(coverage=False)
+    """
     
     info = get_project_info()
     if not info.has_tests:
@@ -559,7 +1061,41 @@ def commit(
     scope: Optional[str] = typer.Option(None, "--scope", "-s", help="Commit scope"),
     breaking: bool = typer.Option(False, "--breaking", "-b", help="Breaking change"),
 ) -> None:
-    """Create a conventional commit with interactive prompts."""
+    """Create a conventional commit with interactive prompts and validation.
+
+    Guides the user through creating a properly formatted conventional commit
+    message. Shows repository status, allows selective staging, and supports
+    detailed commit messages with breaking change notes.
+
+    Parameters
+    ----------
+    type : CommitType
+        The type of change being committed (feat, fix, docs, etc.).
+    scope : str, optional
+        Optional scope to group related commits (e.g., "auth", "api").
+    breaking : bool, default False
+        Whether this commit introduces breaking changes.
+
+    Raises
+    ------
+    typer.Exit
+        If not in a git repository or no changes to commit.
+
+    Notes
+    -----
+    Follows the conventional commits specification. The commit message format is:
+    <type>(<scope>)!: <description>
+
+    Optional body and breaking change notes can be added interactively.
+
+    Examples
+    --------
+    Create a feature commit:
+    >>> commit(CommitType.FEAT, scope="auth")
+
+    Create a breaking fix:
+    >>> commit(CommitType.FIX, breaking=True)
+    """
     
     repo = GitManager.get_repo()
     if not repo:
@@ -636,7 +1172,20 @@ def commit(
 
 @app.command()
 def info() -> None:
-    """Show project information."""
+    """Display comprehensive information about the current project.
+
+    Gathers and presents project metadata in a formatted panel, including
+    project name, paths, Python version, git status, and dependency counts.
+
+    Notes
+    -----
+    Uses get_project_info() to collect current project state.
+    Displays information in a Rich-formatted panel for easy reading.
+
+    Examples
+    --------
+    >>> info()  # Shows project info in terminal
+    """
     
     info = get_project_info()
     
@@ -657,7 +1206,41 @@ def info() -> None:
 def fix(
     what: str = typer.Argument("all", help="What to fix: format, lint, types, or all"),
 ) -> None:
-    """Quick fixes for common issues."""
+    """Apply quick fixes for common code quality issues.
+
+    Runs automated tools to format code, fix linting issues, and check types.
+    Supports running individual tools or all of them in sequence.
+
+    Parameters
+    ----------
+    what : str, default "all"
+        Which fixes to apply: "format", "lint", "types", or "all".
+
+    Raises
+    ------
+    typer.Exit
+        If pyproject.toml is missing or invalid fix target specified.
+
+    Notes
+    -----
+    Uses the following tools:
+    - format: ruff format (code formatting)
+    - lint: ruff check --fix (linting and auto-fixes)
+    - types: mypy (static type checking)
+
+    All tools are run via uv to ensure proper environment isolation.
+
+    Examples
+    --------
+    Fix all issues:
+    >>> fix()
+
+    Format code only:
+    >>> fix("format")
+
+    Check types only:
+    >>> fix("types")
+    """
     
     info = get_project_info()
     if not info.has_pyproject:
