@@ -121,6 +121,38 @@ def prompt_for_base_branch(initial: RepoState) -> tuple[str, RepoState]:
     return selected, refreshed_state
 
 
+def get_branch_remote(branch: str) -> str:
+    remote = git_output(["config", f"branch.{branch}.remote"])
+    return remote or "origin"
+
+
+def push_branch_if_needed(state: RepoState) -> None:
+    upstream_missing = not state.upstream
+    ahead_only = state.ahead > 0
+
+    if not upstream_missing and not ahead_only:
+        return
+
+    reason = "No upstream configured" if upstream_missing else "Local branch is ahead of remote"
+    console.print(f"[yellow]{reason}. A push is required before creating the PR.[/yellow]")
+
+    if not typer.confirm("Push current branch now?", default=True):
+        console.print("[red]Cannot create PR without pushing the branch. Aborting.[/red]")
+        raise typer.Exit(1)
+
+    remote = get_branch_remote(state.branch)
+    if upstream_missing:
+        push_cmd = ["git", "push", "-u", remote, state.branch]
+    else:
+        push_cmd = ["git", "push"]
+
+    console.print(f"[cyan]Running: {' '.join(push_cmd)}[/cyan]")
+    try:
+        sp.run(push_cmd, check=True)
+    except sp.CalledProcessError as exc:
+        console.print(f"[red]Failed to push branch:[/red]\n{exc.stderr or exc.stdout}")
+        raise typer.Exit(1)
+
 def resolve_base_reference(explicit_base: Optional[str]) -> tuple[str, str, Optional[str]]:
     """Determine the base branch and diff reference for comparisons."""
 
@@ -763,6 +795,12 @@ def create(
                 state = refreshed
 
     display_repo_state(state)
+
+    push_branch_if_needed(state)
+    state = inspect_repository(base)
+    if state is None:
+        console.print("[red]Error:[/red] Unable to inspect repository after push.")
+        raise typer.Exit(1)
 
     if not allow_dirty and not state.clean:
         console.print("[red]Working tree has uncommitted changes. Use --allow-dirty to override.[/red]")
