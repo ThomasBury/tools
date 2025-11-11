@@ -52,6 +52,7 @@ In the interactive UI:
 
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -183,6 +184,63 @@ class CommitSuggestion:
         """
         body = self.body.strip()
         return f"{self.title.strip()}\n\n{body}" if body else self.title.strip()
+
+
+_JSON_FENCE_PATTERN = re.compile(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```", re.IGNORECASE)
+
+
+def _parse_commit_plan_response(raw: str) -> list[Any] | None:
+    """Extract a JSON array from an LLM response, tolerating extra chatter.
+
+    This function is designed to robustly parse a JSON array from a string
+    that may contain leading/trailing text, or have the JSON enclosed in
+    markdown-style code fences.
+
+    Parameters
+    ----------
+    raw : str
+        The raw string response from the LLM, which is expected to
+        contain a JSON array.
+
+    Returns
+    -------
+    list[Any] | None
+        The parsed list of objects from the JSON array, or None if no
+        valid JSON array could be extracted.
+    """
+
+    raw = raw.strip()
+    if not raw:
+        return None
+
+    decoder = json.JSONDecoder()
+
+    def _try_decode(candidate: str) -> list[Any] | None:
+        try:
+            data, _ = decoder.raw_decode(candidate)
+        except json.JSONDecodeError:
+            return None
+        return data if isinstance(data, list) else None
+
+    direct = _try_decode(raw)
+    if direct is not None:
+        return direct
+
+    fence_match = _JSON_FENCE_PATTERN.search(raw)
+    if fence_match:
+        fenced = fence_match.group(1).strip()
+        decoded = _try_decode(fenced)
+        if decoded is not None:
+            return decoded
+
+    idx = raw.find("[")
+    while idx != -1:
+        decoded = _try_decode(raw[idx:])
+        if decoded is not None:
+            return decoded
+        idx = raw.find("[", idx + 1)
+
+    return None
 
 
 class CommitWorkflowApp(App[Any | None]):
@@ -986,7 +1044,8 @@ each commit provide:
   new paths. Each file should appear in at most one commit.
 
 Output valid JSON consisting of an array of commit objects in the order they
-should be created. Do not wrap the JSON in code fences or add commentary.
+should be created. Your entire output must be exactly this JSON array with no
+text before or after it. Do not wrap the JSON in code fences or add commentary.
 
 If no meaningful commits are possible, return an empty JSON array [].
 
@@ -1004,15 +1063,8 @@ Relevant diff (truncated if necessary):
         console.print(f"[red]Error generating commit plan:[/red] {exc}")
         return []
 
-    json_text = raw
-    if "[" in raw and "]" in raw:
-        start = raw.find("[")
-        end = raw.rfind("]") + 1
-        json_text = raw[start:end]
-
-    try:
-        data = json.loads(json_text)
-    except json.JSONDecodeError:
+    data = _parse_commit_plan_response(raw)
+    if data is None:
         console.print("[yellow]Warning: Unable to parse commit plan JSON.[/yellow]")
         return []
 
@@ -1069,8 +1121,8 @@ def split_commit_message(message: str) -> tuple[str, str]:
     >>> title
     'feat: add feature'
     >>> body
-def split_commit_message(message: str) -> tuple[str, str]:
-    """Split a full commit message into title and body."""
+    'This adds a new feature.'
+    """
 
     lines = [line.rstrip() for line in message.strip().splitlines() if line.strip() or line == ""]
     if not lines:
@@ -1306,6 +1358,30 @@ def launch_commit_ui(
         return typer.edit(initial_message)
 
 
+def repository_has_commits() -> bool:
+    """
+    Return True if the repository has at least one commit (HEAD exists).
+
+    This helper checks for the presence of HEAD via `git rev-parse --verify HEAD`.
+    It allows the CLI to tailor messaging for brand-new repositories where no
+    commits exist yet.
+    """
+
+    try:
+        subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return True
+    except subprocess.CalledProcessError:
+        return False
+    except FileNotFoundError:
+        console.print("[red]Error: git not found. Is it installed and in your PATH?[/red]")
+        raise typer.Exit(1)
+
+
 def apply_commit_plan(plan: list[CommitSuggestion]) -> None:
     """
     Apply the generated commit plan by staging files and committing.
@@ -1475,9 +1551,16 @@ def main(
         console.print("[yellow]No changes detected. Nothing to commit.[/yellow]")
         raise typer.Exit()
 
+    has_commits = repository_has_commits()
     staged_diff = get_staged_diff()
-    full_diff = get_full_diff()
-    diff_for_ui = staged_diff or full_diff or "No diff available."
+    full_diff = get_full_diff() if has_commits else ""
+    diff_for_ui = staged_diff or full_diff
+    if not diff_for_ui.strip():
+        diff_for_ui = (
+            "Repository has no commits yet. Stage files to preview a diff."
+            if not has_commits
+            else "No diff available."
+        )
 
     console.print("[cyan]Drafting commit plan...[/cyan]")
     plan = generate_commit_plan(status, full_diff or staged_diff, model)
@@ -1500,6 +1583,18 @@ def main(
 
     if yes:
         if allow_manual_commit:
+            latest_staged_diff = get_staged_diff()
+            if not latest_staged_diff.strip():
+                console.print(
+                    "[yellow]No staged changes detected when attempting to commit. Aborting.[/yellow]"
+                )
+                raise typer.Exit()
+            if latest_staged_diff != staged_diff:
+                console.print(
+                    "[yellow]Staged changes updated after generating the commit message. "
+                    "Refreshing message to match current diff...[/yellow]"
+                )
+                message = generate_commit_message(latest_staged_diff, model)
             console.print(Panel(message, title="Generated Commit Message", border_style="green"))
             run_git_commit(message)
         elif plan:
