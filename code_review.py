@@ -413,9 +413,6 @@ def find_python_files(
     gitignore_spec : pathspec.PathSpec | None, optional
         A PathSpec object representing the gitignore rules. If provided,
         files matching these rules will be excluded. By default, None.
-
-    Parameters
-    ----------
     gitignore_base : Path | None, optional
         Directory used as the reference point for gitignore matching. Defaults
         to ``path`` (or its parent when ``path`` is a file).
