@@ -977,8 +977,9 @@ def check_git_status(path: Path) -> str | None:
             capture_output=True,
             text=True,
             check=False,
+            timeout=5,
         )
-    except (FileNotFoundError, OSError):
+    except (FileNotFoundError, OSError, sp.TimeoutExpired):
         return None
 
     if result.returncode != 0:
