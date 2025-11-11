@@ -337,14 +337,21 @@ def get_repo_root(path: Path) -> Path | None:
             capture_output=True,
             text=True,
             check=False,
+            timeout=5,
         )
     except (FileNotFoundError, OSError):
+        return None
+    except sp.TimeoutExpired:
         return None
 
     if result.returncode != 0:
         return None
+    
+    output = result.stdout.strip()
+    if not output:
+        return None
 
-    return Path(result.stdout.strip())
+    return Path(output)
 
 
 def get_gitignore_spec(root: Path) -> pathspec.PathSpec | None:
