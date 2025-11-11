@@ -327,6 +327,26 @@ def sanitize_prompt_contents(files: list[CodeFile]) -> tuple[dict[Path, str], li
     return sanitized_map, warnings
 
 
+def get_repo_root(path: Path) -> Path | None:
+    """Return the Git repository root containing *path*, if any."""
+
+    try:
+        result = sp.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=path if path.is_dir() else path.parent,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    return Path(result.stdout.strip())
+
+
 def get_gitignore_spec(root: Path) -> pathspec.PathSpec | None:
     """Get gitignore patterns if available.
 
@@ -373,8 +393,13 @@ def get_gitignore_spec(root: Path) -> pathspec.PathSpec | None:
     return None
 
 
-def find_python_files(path: Path, gitignore_spec: pathspec.PathSpec | None = None) -> list[Path]:
-    """Find all Python files in path, respecting gitignore.
+def find_python_files(
+    path: Path,
+    gitignore_spec: pathspec.PathSpec | None = None,
+    gitignore_base: Path | None = None,
+    limit: int | None = None,
+) -> tuple[list[Path], bool]:
+    """Find Python files in ``path`` honoring gitignore rules and an optional limit.
 
     This function recursively searches for all files with the '.py' extension
     within the given `path`. It also filters out files that are ignored by
@@ -389,10 +414,22 @@ def find_python_files(path: Path, gitignore_spec: pathspec.PathSpec | None = Non
         A PathSpec object representing the gitignore rules. If provided,
         files matching these rules will be excluded. By default, None.
 
+    Parameters
+    ----------
+    gitignore_base : Path | None, optional
+        Directory used as the reference point for gitignore matching. Defaults
+        to ``path`` (or its parent when ``path`` is a file).
+    limit : int | None, optional
+        Maximum number of files to return. When provided, the traversal stops as
+        soon as ``limit + 1`` files are found, so the command remains fast in
+        large repositories while still reporting when additional files were
+        skipped.
+
     Returns
     -------
-    list[Path]
-        A sorted list of `Path` objects representing the Python files found.
+    tuple[list[Path], bool]
+        Sorted list of paths and a boolean indicating whether additional files
+        were skipped due to ``limit``.
 
     Examples
     --------
@@ -417,24 +454,24 @@ def find_python_files(path: Path, gitignore_spec: pathspec.PathSpec | None = Non
     >>> Path("my_project/.gitignore").write_text("*.csv\\n")
     >>>
     >>> # Example 1: Basic usage without gitignore
-    >>> python_files_no_ignore = find_python_files(Path("my_project"))
+    >>> python_files_no_ignore, _ = find_python_files(Path("my_project"))
     >>> print([str(p.relative_to("my_project")) for p in python_files_no_ignore])
     ['main.py', 'utils.py']
     >>>
     >>> # Example 2: Usage with gitignore
     >>> gitignore_content = Path("my_project/.gitignore").read_text()
     >>> spec = pathspec.PathSpec.from_lines(pathspec. patrones.GitPattern, gitignore_content.splitlines())
-    >>> python_files_with_ignore = find_python_files(Path("my_project"), gitignore_spec=spec)
+    >>> python_files_with_ignore, _ = find_python_files(Path("my_project"), gitignore_spec=spec)
     >>> print([str(p.relative_to("my_project")) for p in python_files_with_ignore])
     ['main.py', 'utils.py'] # Note: data/raw.csv is not a python file and .venv is excluded by default
     >>>
     >>> # Example 3: Searching a single python file
-    >>> single_file_result = find_python_files(Path("my_project/main.py"))
+    >>> single_file_result, _ = find_python_files(Path("my_project/main.py"))
     >>> print([str(p.relative_to("my_project")) for p in single_file_result])
     ['main.py']
     >>>
     >>> # Example 4: Searching a non-python file
-    >>> non_python_file_result = find_python_files(Path("my_project/data/raw.csv"))
+    >>> non_python_file_result, _ = find_python_files(Path("my_project/data/raw.csv"))
     >>> print(non_python_file_result)
     []
     >>>
@@ -443,22 +480,38 @@ def find_python_files(path: Path, gitignore_spec: pathspec.PathSpec | None = Non
     >>> shutil.rmtree("my_project")
     """
     if path.is_file():
-        return [path] if path.suffix == ".py" else []
+        return ([path] if path.suffix == ".py" else []), False
 
     files: list[Path] = []
+    truncated = False
     search_root = path
+    ignore_base = gitignore_base or (path if path.is_dir() else path.parent)
+
     for file in search_root.rglob("*.py"):
         relative_file_path = file.relative_to(search_root)
-        if gitignore_spec and gitignore_spec.match_file(str(relative_file_path)):
-            continue
+
+        if gitignore_spec:
+            try:
+                ignore_relative = file.relative_to(ignore_base).as_posix()
+            except ValueError:
+                ignore_relative = relative_file_path.as_posix()
+
+            if gitignore_spec.match_file(ignore_relative):
+                continue
 
         parts = relative_file_path.parts
         if any(p in {".venv", "venv", ".uv", "__pycache__", ".git", "build", "dist"} for p in parts):
             continue
 
         files.append(file)
+        if limit and len(files) > limit:
+            truncated = True
+            break
 
-    return sorted(files)
+    if truncated and limit:
+        files = files[:limit]
+
+    return sorted(files), truncated
 
 def read_code_file(file: Path, max_size: int = MAX_FILE_SIZE) -> CodeFile | None:
     """Read a code file with size limits.
@@ -909,46 +962,29 @@ def check_git_status(path: Path) -> str | None:
     >>> status = check_git_status(non_repo_path)
     >>> print(status) # Output: None
     """
+    git_root = get_repo_root(path)
+    if not git_root:
+        return None
+
     try:
-        # Find the root of the Git repository
-        result = sp.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=path if path.is_dir() else path.parent,
-            capture_output=True,
-            text=True,
-            check=False
-        )
-
-        if result.returncode != 0:
-            # Not a git repository
-            return None
-
-        git_root: Path = Path(result.stdout.strip())
-
-        # Get the brief status of the repository
         result = sp.run(
             ["git", "status", "--short"],
             cwd=git_root,
             capture_output=True,
             text=True,
-            check=False
+            check=False,
         )
-
-        if result.returncode == 0 and result.stdout:
-            # Repository has uncommitted changes
-            lines = result.stdout.strip().split("\n")
-            return f"Git repository with {len(lines)} uncommitted changes"
-        elif result.returncode == 0:
-            # Repository is clean
-            return "Git repository (clean)"
-    except FileNotFoundError:
-        # git binary is not available on PATH
-        return None
-    except OSError:
-        # Other OS-level issues (e.g., permission errors)
+    except (FileNotFoundError, OSError):
         return None
 
-    return None
+    if result.returncode != 0:
+        return None
+
+    if result.stdout:
+        lines = result.stdout.strip().split("\n")
+        return f"Git repository with {len(lines)} uncommitted changes"
+
+    return "Git repository (clean)"
 
 
 @app.command()
@@ -1019,23 +1055,35 @@ def review(
         console.print(f"[red]Error:[/red] Path '{path}' does not exist")
         raise typer.Exit(1)
 
+    if max_files < 1:
+        console.print("[red]Error:[/red] --max-files must be at least 1")
+        raise typer.Exit(1)
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
         task = progress.add_task("Finding Python files...", total=None)
-        root = path if path.is_dir() else path.parent
-        gitignore_spec = get_gitignore_spec(root)
-        files = find_python_files(path, gitignore_spec)
+        scope_root = path if path.is_dir() else path.parent
+        repo_root = get_repo_root(scope_root)
+        context_root = repo_root or scope_root
+        gitignore_spec = get_gitignore_spec(context_root)
+        files, truncated = find_python_files(
+            path,
+            gitignore_spec=gitignore_spec,
+            gitignore_base=context_root,
+            limit=max_files,
+        )
 
         if not files:
             console.print("[yellow]No Python files found to review.[/yellow]")
             raise typer.Exit(0)
 
-        if len(files) > max_files:
-            console.print(f"[yellow]Found {len(files)} files, reviewing first {max_files}[/yellow]")
-            files = files[:max_files]
+        if truncated:
+            console.print(
+                f"[yellow]Found more than {max_files} Python files, reviewing first {max_files}[/yellow]"
+            )
 
         progress.update(task, description="Reading files...")
         code_files = [cf for f in files if (cf := read_code_file(f))]
@@ -1068,8 +1116,8 @@ def review(
             for warning in secret_warnings:
                 console.print(f"  - {warning}")
 
-        git_status = check_git_status(root)
-        project_context = get_project_context(root)
+        git_status = check_git_status(context_root)
+        project_context = get_project_context(context_root)
         timeline = render_review_summary(code_files, focus, git_status, project_context)
         console.print(timeline)
 
