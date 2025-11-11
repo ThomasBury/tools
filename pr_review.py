@@ -25,7 +25,9 @@ Features
 - Pre-flight PR preparation with best-practice checks
 - AI-crafted PR descriptions using configurable models
 - Pull request creation via GitHub CLI
-- AI-assisted code reviews with focus areas (security, performance, etc.)
+- Autonomous AI-driven reviews that analyze diffs and determine focus areas
+- Chained review execution across multiple focus areas
+- AI-suggested follow-up actions for addressing review findings
 - Integration with GitHub's review system for posting comments
 - Support for multiple LLM models via the llm library
 
@@ -37,7 +39,7 @@ Basic usage examples:
 
     ./pr_review.py prepare --describe  # Inspect branch and draft PR description
     ./pr_review.py create --title "Add feature" --body "..."  # Create PR
-    ./pr_review.py review 123  # Review PR #123
+    ./pr_review.py review 123  # Autonomous AI-driven review
     ./pr_review.py check  # List PRs needing review
 """
 
@@ -45,6 +47,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess as sp
 import sys
 from dataclasses import dataclass
@@ -63,8 +66,185 @@ from rich.table import Table
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 console = Console()
 
-# Default model for reviews
-DEFAULT_MODEL = "gemini-2.5-flash-lite"
+# Config file handling
+CONFIG_FILE = Path(__file__).parent / "pr_review_config.json"
+
+def load_config() -> dict[str, Any]:
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            return {}
+    return {}
+
+def save_config(config: dict[str, Any]) -> None:
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(config, f, indent=2)
+
+# Default model handling
+DEFAULT_MODEL_FALLBACK = "gemini-2.5-flash-lite"
+
+
+def get_default_model() -> str:
+    """Return the persisted default model or fallback."""
+
+    return load_config().get("model", DEFAULT_MODEL_FALLBACK)
+
+
+def resolve_model_selection(selected: Optional[str]) -> str:
+    """Resolve the model option and persist new selections."""
+
+    default_model = get_default_model()
+    if selected:
+        choice = selected.strip()
+        if choice and choice != load_config().get("model"):
+            config = load_config()
+            config["model"] = choice
+            save_config(config)
+        return choice or default_model
+    return default_model
+
+
+DEFAULT_MODEL_DISPLAY = get_default_model()
+
+PR_DESCRIPTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "title": {
+            "type": "string",
+            "description": "Concise pull request title (<= 72 characters).",
+        },
+        "body": {
+            "type": "string",
+            "description": "Markdown formatted pull request body.",
+        },
+    },
+    "required": ["title", "body"],
+}
+STRUCTURED_CAPABILITY_KEYS = {"schema", "json_schema", "structured-output"}
+
+
+class RepositoryStateError(Exception):
+    """Custom error for repository inspection issues."""
+
+
+def model_supports_structured_output(model: Any) -> bool:
+    """Best-effort detection for models that can honour JSON schemas."""
+
+    for attr_name in (
+        "supports_schema",
+        "supports_schemas",
+        "supports_structured_output",
+        "supports_json_schema",
+    ):
+        attr = getattr(model, attr_name, None)
+        if isinstance(attr, bool):
+            return attr
+        if callable(attr):
+            try:
+                return bool(attr())
+            except TypeError:
+                continue
+
+    capabilities = getattr(model, "capabilities", None)
+    if isinstance(capabilities, (set, list, tuple)):
+        for capability in capabilities:
+            if capability in STRUCTURED_CAPABILITY_KEYS:
+                return True
+
+    return False
+
+
+def parse_structured_response(raw: str) -> Optional[Any]:
+    """Extract structured JSON content (object or array) from raw model output."""
+
+    candidates = [raw.strip()]
+
+    fenced_matcher = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+    candidates.extend(match.group(1).strip() for match in fenced_matcher.finditer(raw))
+
+    if "{" in raw and "}" in raw:
+        start = raw.find("{")
+        end = raw.rfind("}") + 1
+        if start != -1 and end != -1 and end > start:
+            candidates.append(raw[start:end].strip())
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            payload = json.loads(candidate)
+            if isinstance(payload, (dict, list)):
+                return payload
+        except json.JSONDecodeError:
+            continue
+
+    return None
+
+
+def build_fallback_body(raw: str) -> str:
+    """Create a safe markdown body when structured parsing fails."""
+
+    snippet = raw.strip() or "No additional output provided."
+    if len(snippet) > 1500:
+        snippet = snippet[:1500].rstrip() + "\n..."
+
+    safe_snippet = snippet.replace("```", "``\\`")
+    return (
+        "## Summary\n"
+        "- Structured output parsing failed; using raw model text below.\n\n"
+        "## Raw Model Output\n"
+        "```\n"
+        f"{safe_snippet}\n"
+        "```\n"
+    )
+
+
+def extract_summary_section(review_text: str) -> str:
+    """Pull the summary section from an AI-generated review."""
+
+    lines = review_text.splitlines()
+    collected: list[str] = []
+    capturing = False
+
+    def starts_summary(line: str) -> bool:
+        normalized = line.lower()
+        return "**summary**" in normalized or normalized.startswith("summary")
+
+    def starts_next_section(line: str) -> bool:
+        normalized = line.lower()
+        if not normalized:
+            return False
+        if "**strength" in normalized or "**issues" in normalized or "**suggestion" in normalized:
+            return True
+        if normalized[0].isdigit() and normalized[:2].isdigit():
+            return True
+        if normalized.startswith("strength"):
+            return True
+        return False
+
+    for line in lines:
+        stripped = line.strip()
+        if not capturing:
+            if starts_summary(stripped):
+                capturing = True
+                after = stripped.split("**Summary**", 1)
+                if len(after) == 2 and after[1].strip():
+                    collected.append(after[1].strip())
+                    continue
+                after = stripped.split("Summary", 1)
+                if len(after) == 2 and after[1].strip():
+                    collected.append(after[1].strip())
+                continue
+        else:
+            if starts_next_section(stripped):
+                break
+            collected.append(line)
+
+    summary = "\n".join(s.strip() for s in collected if s.strip())
+    return summary.strip()
 
 
 def git_output(args: list[str], *, strip: bool = True) -> Optional[str]:
@@ -94,6 +274,22 @@ def git_output(args: list[str], *, strip: bool = True) -> Optional[str]:
         return None
 
     return result.stdout.strip() if strip else result.stdout
+
+
+def is_git_repository() -> bool:
+    """Return True when current working directory is inside a git repository."""
+
+    return git_output(["rev-parse", "--is-inside-work-tree"]) == "true"
+
+
+def warn_if_gh_missing() -> None:
+    """Emit a warning if the GitHub CLI is not available."""
+
+    if shutil.which("gh") is None:
+        console.print(
+            "[yellow]Warning:[/yellow] GitHub CLI (gh) not detected. "
+            "Install from https://cli.github.com/ for full functionality."
+        )
 
 
 def list_local_branches() -> list[str]:
@@ -158,17 +354,19 @@ def prompt_for_base_branch(initial: RepoState) -> tuple[str, RepoState]:
     if selected.startswith("origin/"):
         selected = selected.split("/", 1)[1]
 
-    refreshed_state = inspect_repository(selected)
-    if refreshed_state is None:
+    try:
+        refreshed_state = inspect_repository(selected)
+    except RepositoryStateError as exc:
         console.print(
             f"[yellow]Falling back to current branch comparison; unable to inspect '{selected}'.[/yellow]"
         )
+        console.print(f"[yellow]- Reason: {exc}[/yellow]")
         refreshed_state = initial
     return selected, refreshed_state
 
 
-def get_branch_remote(branch: str) -> str:
-    """Get the remote associated with a branch.
+def get_branch_remote(branch: str) -> tuple[Optional[str], bool]:
+    """Determine remote for the given branch.
 
     Parameters
     ----------
@@ -177,11 +375,23 @@ def get_branch_remote(branch: str) -> str:
 
     Returns
     -------
-    str
-        Remote name for the branch, defaults to "origin" if not configured.
+    tuple[Optional[str], bool]
+        Remote name and whether it came from explicit branch configuration.
     """
     remote = git_output(["config", f"branch.{branch}.remote"])
-    return remote or "origin"
+    if remote:
+        return remote, True
+
+    remotes_output = git_output(["remote"])
+    if not remotes_output:
+        return None, False
+
+    for candidate in remotes_output.splitlines():
+        candidate = candidate.strip()
+        if candidate:
+            return candidate, False
+
+    return None, False
 
 
 def push_branch_if_needed(state: RepoState) -> None:
@@ -213,7 +423,17 @@ def push_branch_if_needed(state: RepoState) -> None:
         console.print("[red]Cannot create PR without pushing the branch. Aborting.[/red]")
         raise typer.Exit(1)
 
-    remote = get_branch_remote(state.branch)
+    remote, remote_configured = get_branch_remote(state.branch)
+    if not remote:
+        console.print(
+            "[red]No git remotes are configured. Add a remote (e.g., `git remote add origin <url>`) before continuing.[/red]"
+        )
+        raise typer.Exit(1)
+    if not remote_configured:
+        console.print(
+            f"[yellow]Branch '{state.branch}' has no upstream configured. Using remote '{remote}' for the push.[/yellow]"
+        )
+
     if upstream_missing:
         push_cmd = ["git", "push", "-u", remote, state.branch]
     else:
@@ -223,8 +443,52 @@ def push_branch_if_needed(state: RepoState) -> None:
     try:
         sp.run(push_cmd, check=True)
     except sp.CalledProcessError as exc:
-        console.print(f"[red]Failed to push branch:[/red]\n{exc.stderr or exc.stdout}")
+        console.print("[red]Failed to push branch.[/red]")
+        console.print(f"[red]- Command:[/red] {' '.join(push_cmd)}")
+        console.print(f"[red]- Exit code:[/red] {exc.returncode}")
+
+        stderr = (exc.stderr or "").strip()
+        stdout = (exc.stdout or "").strip()
+        output_chunks = []
+        if stderr:
+            output_chunks.append(("stderr", stderr))
+        if stdout:
+            output_chunks.append(("stdout", stdout))
+
+        if output_chunks:
+            for label, chunk in output_chunks:
+                console.print(
+                    Panel(
+                        chunk,
+                        title=f"git push {label}",
+                        border_style="red",
+                    )
+                )
+        else:
+            console.print(
+                "[yellow]No output captured. Re-run with `GIT_TRACE=1` or `GIT_CURL_VERBOSE=1` for additional details.[/yellow]"
+            )
         raise typer.Exit(1)
+
+def get_remote_default_branch(remote: str) -> Optional[str]:
+    """Return the remote's HEAD branch if available."""
+
+    remote_head = git_output(["symbolic-ref", f"refs/remotes/{remote}/HEAD"])
+    if remote_head:
+        parts = remote_head.split("/")
+        if parts:
+            return parts[-1]
+
+    remote_show = git_output(["remote", "show", remote], strip=False)
+    if not remote_show:
+        return None
+
+    for line in remote_show.splitlines():
+        line = line.strip()
+        if line.lower().startswith("head branch:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
 
 def resolve_base_reference(explicit_base: Optional[str]) -> tuple[str, str, Optional[str]]:
     """Determine the base branch and diff reference for comparisons.
@@ -241,25 +505,80 @@ def resolve_base_reference(explicit_base: Optional[str]) -> tuple[str, str, Opti
     """
 
     upstream = git_output(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+    current_branch = git_output(["rev-parse", "--abbrev-ref", "HEAD"]) or ""
     if explicit_base:
-        base_branch = explicit_base
+        if "/" in explicit_base:
+            _, branch = explicit_base.split("/", 1)
+            base_branch = branch
+        else:
+            base_branch = explicit_base
         diff_ref = explicit_base
-    elif upstream:
+        return base_branch, diff_ref, upstream
+
+    if upstream:
         if "/" in upstream:
             remote, branch = upstream.split("/", 1)
-            base_branch = branch
-            diff_ref = f"{remote}/{branch}"
-        else:
-            base_branch = upstream
-            diff_ref = upstream
-    else:
-        base_branch = "main"
-        diff_ref = "origin/main"
+            if branch == current_branch:
+                default_branch = get_remote_default_branch(remote)
+                if default_branch:
+                    return default_branch, f"{remote}/{default_branch}", upstream
+                console.print(
+                    f"[yellow]Unable to infer base from upstream '{upstream}'. Falling back to default branches.[/yellow]"
+                )
+            else:
+                return branch, f"{remote}/{branch}", upstream
+        elif upstream != current_branch:
+            return upstream, upstream, upstream
 
+    remotes_output = git_output(["remote"], strip=False)
+    remotes = [line.strip() for line in remotes_output.splitlines()] if remotes_output else []
+    remotes = [remote for remote in remotes if remote]
+
+    if not remotes:
+        console.print(
+            "[yellow]No git remotes detected. Defaulting to local 'main' for comparisons.[/yellow]"
+        )
+        return "main", "main", upstream
+
+    preferred_remote = "origin" if "origin" in remotes else remotes[0]
+    if preferred_remote != "origin":
+        console.print(
+            "[yellow]Remote 'origin' not found. Unable to infer default base branch automatically.[/yellow]"
+        )
+        try:
+            if typer.confirm(
+                "Would you like to provide the base reference manually?",
+                default=False,
+            ):
+                manual_base = typer.prompt(
+                    "Base reference (e.g., main or upstream/main)", default="main"
+                ).strip()
+                if manual_base:
+                    if "/" in manual_base:
+                        _, branch = manual_base.split("/", 1)
+                        base_branch = branch
+                        diff_ref = manual_base
+                    else:
+                        base_branch = manual_base
+                        diff_ref = manual_base
+                    return base_branch, diff_ref, upstream
+        except typer.Abort as exc:
+            raise RepositoryStateError("Base reference selection aborted.") from exc
+
+        console.print(
+            f"[yellow]Falling back to remote '{preferred_remote}' for base comparison.[/yellow]"
+        )
+
+    default_branch = get_remote_default_branch(preferred_remote)
+    if default_branch:
+        return default_branch, f"{preferred_remote}/{default_branch}", upstream
+
+    base_branch = "main"
+    diff_ref = f"{preferred_remote}/main"
     return base_branch, diff_ref, upstream
 
 
-def inspect_repository(base: Optional[str] = None) -> Optional[RepoState]:
+def inspect_repository(base: Optional[str] = None) -> RepoState:
     """Collect repository status details for PR preparation.
 
     Parameters
@@ -269,13 +588,23 @@ def inspect_repository(base: Optional[str] = None) -> Optional[RepoState]:
 
     Returns
     -------
-    Optional[RepoState]
-        Repository state snapshot, or None if not in a git repository.
+    RepoState
+        Repository state snapshot ready for display or further processing.
+
+    Raises
+    ------
+    RepositoryStateError
+        If not in a git repository or if HEAD is detached.
     """
 
     branch = git_output(["rev-parse", "--abbrev-ref", "HEAD"])
     if branch is None:
-        return None
+        raise RepositoryStateError("Not inside a git repository.")
+    if branch == "HEAD":
+        raise RepositoryStateError(
+            "Detached HEAD detected. Switch to a branch before continuing "
+            "(e.g., `git switch <branch>` or `git switch -c <new-branch>`)."
+        )
 
     base_branch, diff_ref, upstream = resolve_base_reference(base)
 
@@ -315,25 +644,69 @@ def inspect_repository(base: Optional[str] = None) -> Optional[RepoState]:
     )
 
 
-def get_diff(diff_ref: str) -> str:
+def get_diff(
+    diff_ref: str,
+    *,
+    allow_staged_fallback: bool = True,
+    prompt_on_fallback: bool = True,
+) -> str:
     """Return diff between base reference and HEAD.
 
     Parameters
     ----------
     diff_ref : str
         Base reference for comparison (e.g., branch name or commit).
+    allow_staged_fallback : bool, optional
+        Whether to fall back to staged changes when the base diff is unavailable.
+        Defaults to True.
+    prompt_on_fallback : bool, optional
+        Prompt the user before using staged changes as a fallback. Defaults to True.
 
     Returns
     -------
     str
         Git diff output, or empty string if no diff available.
+
+    Raises
+    ------
+    RepositoryStateError
+        If the diff cannot be computed and no staged changes are available.
     """
 
     diff_output = git_output(["diff", f"{diff_ref}...HEAD"], strip=False)
-    if diff_output is not None:
-        return diff_output
-    staged_output = git_output(["diff", "--staged"], strip=False)
-    return staged_output or ""
+    if diff_output is None:
+        if not allow_staged_fallback:
+            raise RepositoryStateError(
+                f"Unable to compute diff against '{diff_ref}', and staged fallback is disabled."
+            )
+        staged_output = git_output(["diff", "--staged"], strip=False)
+        if staged_output:
+            if prompt_on_fallback:
+                try:
+                    use_staged = typer.confirm(
+                        (
+                            f"Unable to diff against '{diff_ref}'. "
+                            "Use staged changes instead?"
+                        ),
+                        default=True,
+                    )
+                except typer.Abort as exc:
+                    raise RepositoryStateError("Diff generation aborted by user.") from exc
+                if not use_staged:
+                    raise RepositoryStateError(
+                        f"Unable to compute diff against '{diff_ref}'. "
+                        "Provide a valid base reference or fetch the base branch."
+                    )
+            console.print(
+                "[yellow]Warning:[/yellow] Unable to diff against "
+                f"'{diff_ref}'. Using staged changes instead. "
+                "Run `git fetch` or specify --base to compare against a valid reference."
+            )
+            return staged_output
+        raise RepositoryStateError(
+            f"Unable to compute diff against '{diff_ref}'. Ensure the reference exists or fetch the base branch."
+        )
+    return diff_output
 
 
 def generate_pr_description(diff: str, model_name: str) -> PRDescription:
@@ -388,29 +761,58 @@ Git Diff:
 
     try:
         model = llm.get_model(model_name)
-        response = model.prompt(prompt)
-        raw = response.text().strip()
     except Exception as exc:  # pragma: no cover - LLM failures
-        console.print(f"[red]LLM error while generating PR description:[/red] {exc}")
+        console.print(f"[red]LLM error while loading model '{model_name}':[/red] {exc}")
         return PRDescription(
             title="chore: update",
             body="## Summary\n- Description generation failed.\n\n## Testing\n- Not specified\n",
         )
 
-    payload_text = raw
-    if "{" in raw and "}" in raw:
-        start = raw.find("{")
-        end = raw.rfind("}") + 1
-        payload_text = raw[start:end]
+    structured_response = None
+    if model_supports_structured_output(model):
+        try:
+            structured_response = model.prompt(prompt, schema=PR_DESCRIPTION_SCHEMA)
+        except TypeError:
+            structured_response = None
+        except Exception as exc:
+            console.print(
+                f"[yellow]Structured output not available for model '{model_name}':[/yellow] {exc}"
+            )
+            structured_response = None
 
-    try:
-        data = json.loads(payload_text)
+    response = structured_response
+    if response is None:
+        try:
+            response = model.prompt(prompt)
+        except Exception as exc:  # pragma: no cover - LLM failures
+            console.print(f"[red]LLM error while generating PR description:[/red] {exc}")
+            return PRDescription(
+                title="chore: update",
+                body="## Summary\n- Description generation failed.\n\n## Testing\n- Not specified\n",
+            )
+
+    raw = response.text().strip()
+
+    data = parse_structured_response(raw)
+    if data is None and structured_response is not None:
+        console.print(
+            "[yellow]Warning: structured response parse failed; falling back to raw text parsing.[/yellow]"
+        )
+        # Try again without schema prompt
+        try:
+            fallback_response = model.prompt(prompt)
+            raw = fallback_response.text().strip()
+            data = parse_structured_response(raw)
+        except Exception:  # pragma: no cover - avoid masking original result
+            data = None
+
+    if isinstance(data, dict):
         title = data.get("title") or "chore: update"
         body = data.get("body") or "## Summary\n- Description unavailable\n"
         return PRDescription(title=title.strip(), body=body.strip())
-    except json.JSONDecodeError:
-        console.print("[yellow]Warning: LLM returned invalid JSON. Using raw text as body.[/yellow]")
-        return PRDescription(title="chore: update", body=raw)
+
+    console.print("[yellow]Warning: LLM returned invalid JSON. Using raw model text as fallback.[/yellow]")
+    return PRDescription(title="chore: update", body=build_fallback_body(raw))
 
 
 def display_repo_state(state: RepoState) -> None:
@@ -839,11 +1241,22 @@ class GitHubCLI:
         list[dict[str, Any]]
             List of PR data dictionaries.
         """
-        cmd = ["gh", "pr", "list", "--json",
-               "number,title,author,createdAt,isDraft", "--limit", str(limit)]
+        cmd = [
+            "gh",
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--json",
+            "number,title,author,createdAt,isDraft",
+            "--limit",
+            str(limit),
+            "--search",
+            "review-requested:@me -author:@me",
+        ]
         if repo:
             cmd.extend(["--repo", repo])
-        
+
         result = sp.run(cmd, capture_output=True, text=True, check=True)
         return json.loads(result.stdout)
     
@@ -893,6 +1306,178 @@ def extract_pr_number(reference: str) -> Optional[int]:
         except ValueError:
             return None
     return None
+
+
+def analyze_diff_for_focus_areas(diff: str, model_name: str) -> list[ReviewFocus]:
+    """Use AI to analyze diff and determine relevant focus areas.
+
+    Parameters
+    ----------
+    diff : str
+        Git diff content.
+    model_name : str
+        LLM model to use for analysis.
+
+    Returns
+    -------
+    list[ReviewFocus]
+        Ordered list of focus areas to review, prioritized by relevance.
+    """
+    try:
+        ai_model = llm.get_model(model_name)
+    except llm.UnknownModelError:
+        console.print(f"[red]Error:[/red] Unknown model '{model_name}' for focus analysis")
+        return [ReviewFocus.GENERAL]
+
+    prompt = f"""Analyze this git diff and determine which review focus areas are most relevant.
+Return a JSON array of focus area names in priority order (most important first).
+
+Available focus areas:
+- security: SQL injection, XSS, CSRF, hardcoded secrets, unsafe deserialization, path traversal, auth flaws
+- performance: N+1 queries, memory leaks, inefficient algorithms, blocking operations, cache opportunities
+- tests: missing coverage, edge cases, test quality, mock usage, test performance
+- docs: missing docstrings, outdated docs, README updates, code comments, type hints
+- general: code quality, bugs, best practices, maintainability
+
+Consider:
+- File types and languages changed
+- Size and complexity of changes
+- Potential security implications
+- Performance-sensitive code
+- Test coverage needs
+- Documentation requirements
+
+Return only a JSON array like: ["security", "performance", "tests"]
+
+Diff:
+```diff
+{diff[:10000]}  # Limit diff size for analysis
+```
+
+JSON array:"""
+
+    try:
+        with console.status(
+            f"[cyan]Analyzing diff for focus areas with {model_name}...[/cyan]",
+            spinner="dots",
+        ):
+            response = ai_model.prompt(prompt)
+        raw = response.text().strip()
+
+        # Parse JSON response
+        focus_payload = parse_structured_response(raw)
+        focus_candidates: list[str] = []
+
+        if isinstance(focus_payload, list):
+            focus_candidates = [str(item) for item in focus_payload]
+        elif isinstance(focus_payload, dict):
+            for key in ("focus", "focuses", "focus_areas", "focusAreas", "areas", "reviewAreas"):
+                value = focus_payload.get(key)
+                if value:
+                    if isinstance(value, list):
+                        focus_candidates = [str(item) for item in value]
+                    else:
+                        focus_candidates = [str(value)]
+                    break
+            if not focus_candidates:
+                for value in focus_payload.values():
+                    if isinstance(value, list):
+                        focus_candidates = [str(item) for item in value]
+                        break
+
+        focus_candidates = [name.strip() for name in focus_candidates if name and str(name).strip()]
+
+        if focus_candidates:
+            focus_areas: list[ReviewFocus] = []
+            for name in focus_candidates:
+                try:
+                    focus_areas.append(ReviewFocus(name.lower()))
+                except ValueError:
+                    continue  # Skip invalid focus areas
+            if focus_areas:
+                return focus_areas
+
+    except Exception as e:
+        console.print(f"[yellow]Warning:[/yellow] Failed to analyze focus areas: {e}")
+
+    # Fallback to general review
+    return [ReviewFocus.GENERAL]
+
+
+def suggest_followup_actions(review_text: str, pr: PullRequest, model_name: str) -> list[str]:
+    """Suggest actionable follow-up steps based on the review.
+
+    Parameters
+    ----------
+    review_text : str
+        The AI-generated review text.
+    pr : PullRequest
+        Pull request information.
+    model_name : str
+        LLM model to use for suggestions.
+
+    Returns
+    -------
+    list[str]
+        List of suggested follow-up actions.
+    """
+    try:
+        ai_model = llm.get_model(model_name)
+    except llm.UnknownModelError:
+        return []
+
+    prompt = f"""Based on this AI review of a pull request, suggest specific actionable follow-up steps.
+Focus on concrete actions the author can take to address issues found.
+
+PR Info:
+- Title: {pr.title}
+- Size: {pr.size_category}
+- Files: {pr.changed_files}
+
+Review:
+{review_text}
+
+Suggest 2-4 specific, actionable follow-up steps. Format as a JSON array of strings.
+Each suggestion should be clear and executable.
+
+JSON array:"""
+
+    try:
+        with console.status(
+            f"[cyan]Generating follow-up suggestions with {model_name}...[/cyan]",
+            spinner="dots",
+        ):
+            response = ai_model.prompt(prompt)
+        raw = response.text().strip()
+
+        suggestions_payload = parse_structured_response(raw)
+        suggestions_list: list[str] = []
+
+        if isinstance(suggestions_payload, list):
+            suggestions_list = [str(item) for item in suggestions_payload]
+        elif isinstance(suggestions_payload, dict):
+            for key in ("suggestions", "actions", "follow_up", "followUp", "steps"):
+                value = suggestions_payload.get(key)
+                if value:
+                    if isinstance(value, list):
+                        suggestions_list = [str(item) for item in value]
+                    else:
+                        suggestions_list = [str(value)]
+                    break
+            if not suggestions_list:
+                for value in suggestions_payload.values():
+                    if isinstance(value, list):
+                        suggestions_list = [str(item) for item in value]
+                        break
+
+        suggestions_list = [item.strip() for item in suggestions_list if str(item).strip()]
+        if suggestions_list:
+            return suggestions_list
+
+    except Exception as e:
+        console.print(f"[yellow]Warning:[/yellow] Failed to generate follow-up suggestions: {e}")
+
+    return []
 
 
 def build_review_prompt(pr: PullRequest, diff: str, focus: ReviewFocus) -> str:
@@ -1025,10 +1610,20 @@ def prepare(
         "--describe",
         help="Generate an AI-assisted PR title and body",
     ),
-    model: str = typer.Option(
-        DEFAULT_MODEL,
+    skip_staged_fallback: bool = typer.Option(
+        False,
+        "--skip-staged-fallback",
+        help="Do not use staged changes when the base diff is unavailable.",
+    ),
+    allow_dirty: bool = typer.Option(
+        False,
+        "--allow-dirty",
+        help="Allow generating descriptions with uncommitted changes present.",
+    ),
+    model: Optional[str] = typer.Option(
+        None,
         "--model",
-        help="LLM model to use for description generation",
+        help=f"LLM model to use for description generation (default: {DEFAULT_MODEL_DISPLAY})",
     ),
 ) -> None:
     """Inspect local repository state before creating a PR.
@@ -1039,20 +1634,45 @@ def prepare(
         Base branch to compare against.
     describe : bool, optional
         Generate AI-assisted PR title and body.
-    model : str, optional
-        LLM model for description generation.
+    skip_staged_fallback : bool, optional
+        Disable fallback to staged changes if the base diff cannot be computed.
+    allow_dirty : bool, optional
+        Allow generating descriptions when the working tree has uncommitted changes.
+    model : Optional[str], optional
+        LLM model for description generation. When provided, it becomes the new default.
     """
 
-    state = inspect_repository(base)
-    if state is None:
-        console.print("[red]Error:[/red] Not inside a git repository or HEAD is detached.")
+    if not is_git_repository():
+        console.print("[red]Error:[/red] Not inside a git repository. Run this command from a project managed by git.")
+        raise typer.Exit(1)
+
+    warn_if_gh_missing()
+
+    try:
+        state = inspect_repository(base)
+    except RepositoryStateError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1)
 
     display_repo_state(state)
 
+    resolved_model = resolve_model_selection(model)
+
     if describe:
-        diff = get_diff(state.diff_ref)
-        description = generate_pr_description(diff, model)
+        if not allow_dirty and not state.clean:
+            console.print(
+                "[red]Working tree has uncommitted changes. Use --allow-dirty to generate a description anyway.[/red]"
+            )
+            raise typer.Exit(1)
+        try:
+            diff = get_diff(
+                state.diff_ref,
+                allow_staged_fallback=not skip_staged_fallback,
+            )
+        except RepositoryStateError as exc:
+            console.print(f"[red]Error:[/red] {exc}")
+            raise typer.Exit(1)
+        description = generate_pr_description(diff, resolved_model)
         console.print(
             Panel(
                 f"[bold]Suggested Title[/bold]: {description.title}\n\n{description.body}",
@@ -1091,6 +1711,11 @@ def create(
         "--describe",
         help="Use AI to generate PR title/body when not provided",
     ),
+    skip_staged_fallback: bool = typer.Option(
+        False,
+        "--skip-staged-fallback",
+        help="Do not use staged changes when the base diff is unavailable.",
+    ),
     allow_dirty: bool = typer.Option(
         False,
         "--allow-dirty",
@@ -1102,15 +1727,15 @@ def create(
         "--run-review",
         help="Run the AI review after creating the PR",
     ),
-    focus: ReviewFocus = typer.Option(
-        ReviewFocus.GENERAL,
+    focus: Optional[ReviewFocus] = typer.Option(
+        None,
         "--focus",
-        help="Review focus area when --run-review is used",
+        help="Force a specific focus area when --run-review is used (default: AI selects)",
     ),
-    model: str = typer.Option(
-        DEFAULT_MODEL,
+    model: Optional[str] = typer.Option(
+        None,
         "--model",
-        help="Model used for AI generation",
+        help=f"Model used for AI generation (default: {DEFAULT_MODEL_DISPLAY})",
     ),
     post: bool = typer.Option(
         False,
@@ -1121,6 +1746,11 @@ def create(
         False,
         "--show-diff",
         help="Show diff before review when --run-review is used",
+    ),
+    summary_only: bool = typer.Option(
+        False,
+        "--summary-only",
+        help="Output a short AI summary when --run-review is used",
     ),
 ) -> None:
     """Create a pull request using the GitHub CLI.
@@ -1141,15 +1771,29 @@ def create(
         Repository (owner/name).
     describe : bool, optional
         Use AI to generate title/body.
-    model : str, optional
-        Model for AI generation.
+    skip_staged_fallback : bool, optional
+        Disable fallback to staged changes if the base diff cannot be computed.
+    focus : Optional[ReviewFocus], optional
+        Review focus area when --run-review is used. Defaults to AI-selected priorities.
+    summary_only : bool, optional
+        Output only the summary portion of the AI review when provided.
+    model : Optional[str], optional
+        Model for AI generation. When provided, it becomes the new default.
     """
+
+    if not is_git_repository():
+        console.print("[red]Error:[/red] Not inside a git repository. Run this command from a project managed by git.")
+        raise typer.Exit(1)
+
+    warn_if_gh_missing()
 
     if not GitHubCLI.check_auth():
         console.print("[red]Error:[/red] gh CLI not found or not authenticated")
         console.print("Install: https://cli.github.com")
         console.print("Then run: gh auth login")
         raise typer.Exit(1)
+
+    resolved_model = resolve_model_selection(model)
 
     if fill and describe:
         console.print("[red]Error:[/red] --fill cannot be combined with --describe.")
@@ -1159,9 +1803,10 @@ def create(
         console.print("[red]Error:[/red] --fill cannot be combined with explicit title/body")
         raise typer.Exit(1)
 
-    state = inspect_repository(base)
-    if state is None:
-        console.print("[red]Error:[/red] Not inside a git repository or HEAD is detached.")
+    try:
+        state = inspect_repository(base)
+    except RepositoryStateError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1)
 
     if base is None:
@@ -1169,16 +1814,18 @@ def create(
     else:
         base = base.strip()
         if base and base != state.base_branch:
-            refreshed = inspect_repository(base)
-            if refreshed:
-                state = refreshed
+            try:
+                state = inspect_repository(base)
+            except RepositoryStateError as exc:
+                console.print(f"[yellow]Warning:[/yellow] Unable to inspect base '{base}': {exc}")
 
     display_repo_state(state)
 
     push_branch_if_needed(state)
-    state = inspect_repository(base)
-    if state is None:
-        console.print("[red]Error:[/red] Unable to inspect repository after push.")
+    try:
+        state = inspect_repository(base)
+    except RepositoryStateError as exc:
+        console.print(f"[red]Error:[/red] Unable to inspect repository after push: {exc}")
         raise typer.Exit(1)
 
     if not allow_dirty and not state.clean:
@@ -1194,15 +1841,23 @@ def create(
             "[yellow]Warning:[/yellow] No new commits detected relative to the base reference."
         )
 
-    diff = get_diff(state.diff_ref)
+    try:
+        diff = get_diff(
+            state.diff_ref,
+            allow_staged_fallback=not skip_staged_fallback,
+            prompt_on_fallback=not yes,
+        )
+    except RepositoryStateError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1)
 
     use_ai = describe or (not fill and (title is None or body is None))
     generated = None
     if use_ai:
         console.print(
-            f"[cyan]Generating PR title and body with {model}...[/cyan]"
+            f"[cyan]Generating PR title and body with {resolved_model}...[/cyan]"
         )
-        generated = generate_pr_description(diff, model)
+        generated = generate_pr_description(diff, resolved_model)
         title = title or generated.title
         body = body or generated.body
         console.print(
@@ -1264,9 +1919,10 @@ def create(
         if "must first push" in message:
             console.print("[yellow]Branch not pushed. Attempting to push before retrying...[/yellow]")
             push_branch_if_needed(state)
-            state = inspect_repository(base)
-            if state is None:
-                console.print("[red]Error:[/red] Unable to inspect repository after push.")
+            try:
+                state = inspect_repository(base)
+            except RepositoryStateError as state_exc:
+                console.print(f"[red]Error:[/red] Unable to inspect repository after push: {state_exc}")
                 raise typer.Exit(1)
             try:
                 result = attempt_create(state)
@@ -1304,16 +1960,18 @@ def create(
                 "[red]Unable to determine PR number for review. Skipping automated review.[/red]"
             )
             return
+        focus_label = focus.value if focus else "auto"
         console.print(
-            f"[cyan]Running AI review for PR #{pr_number} using {model} ({focus.value}).[/cyan]"
+            f"[cyan]Running AI review for PR #{pr_number} using {resolved_model} ({focus_label}).[/cyan]"
         )
         review(
             pr_number=pr_number,
             repo=repo,
             focus=focus,
-            model=model,
+            model=resolved_model,
             post=post,
             show_diff=show_diff,
+            summary_only=summary_only,
         )
 
 
@@ -1321,46 +1979,66 @@ def create(
 def review(
     pr_number: int = typer.Argument(..., help="PR number to review"),
     repo: Optional[str] = typer.Option(None, "--repo", "-r", help="Repository (owner/name)"),
-    focus: ReviewFocus = typer.Option(ReviewFocus.GENERAL, "--focus", "-f", help="Review focus area"),
-    model: str = typer.Option(DEFAULT_MODEL, "--model", "-m", help="LLM model to use"),
+    focus: Optional[ReviewFocus] = typer.Option(
+        None,
+        "--focus",
+        "-f",
+        help="Force a specific focus area; omit to let AI prioritize multiple areas.",
+    ),
+    model: Optional[str] = typer.Option(
+        None,
+        "--model",
+        "-m",
+        help=f"LLM model to use (default: {DEFAULT_MODEL_DISPLAY})",
+    ),
     post: bool = typer.Option(False, "--post", "-p", help="Post review as GitHub comment"),
     show_diff: bool = typer.Option(False, "--show-diff", help="Show the diff before review"),
+    max_focus_areas: int = typer.Option(
+        3,
+        "--max-focus",
+        help="Maximum AI-selected focus areas when --focus is not provided.",
+    ),
+    suggest_actions: bool = typer.Option(
+        True,
+        "--suggest-actions/--no-suggest-actions",
+        help="Generate follow-up action suggestions when AI selects focus areas.",
+    ),
+    summary_only: bool = typer.Option(
+        False,
+        "--summary-only",
+        "-s",
+        help="Only display the summary section(s) of the AI review output.",
+    ),
 ) -> None:
-    """Review a GitHub pull request using AI.
+    """Review a GitHub pull request using AI assistance.
 
-    Parameters
-    ----------
-    pr_number : int
-        PR number to review.
-    repo : Optional[str], optional
-        Repository (owner/name).
-    focus : ReviewFocus, optional
-        Review focus area.
-    model : str, optional
-        LLM model to use.
-    post : bool, optional
-        Post review as GitHub comment.
-    show_diff : bool, optional
-        Show diff before review.
+    When ``--focus`` is supplied, a single targeted review is generated.
+    Otherwise, the AI selects up to ``max_focus`` focus areas and produces an
+    aggregated review, optionally suggesting follow-up actions. Use
+    ``--summary-only`` for a condensed output suitable for status updates.
     """
-    
-    # Check gh CLI authentication
+    resolved_model = resolve_model_selection(model)
+
+    warn_if_gh_missing()
+
     if not GitHubCLI.check_auth():
         console.print("[red]Error:[/red] gh CLI not found or not authenticated")
         console.print("Install: https://cli.github.com")
         console.print("Then run: gh auth login")
         raise typer.Exit(1)
-    
+
+    final_review_text = ""
+    pr: Optional[PullRequest] = None
+
     try:
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             console=console,
         ) as progress:
-            # Fetch PR information
             task = progress.add_task("Fetching PR information...", total=None)
             pr_data = GitHubCLI.get_pr_info(pr_number, repo)
-            
+
             pr = PullRequest(
                 number=pr_data["number"],
                 title=pr_data["title"],
@@ -1373,50 +2051,159 @@ def review(
                 changed_files=pr_data.get("changedFiles", 0),
                 draft=pr_data.get("isDraft", False),
             )
-            
+
             progress.update(task, description="Fetching PR diff...")
             diff = GitHubCLI.get_pr_diff(pr_number, repo)
-            
+
             if show_diff:
-                console.print(Panel(diff[:2000] + ("..." if len(diff) > 2000 else ""), 
-                                  title="PR Diff Preview", border_style="dim"))
-            
-            progress.update(task, description="Generating AI review...")
-            prompt = build_review_prompt(pr, diff, focus)
-            
-            # Get the model and generate review
+                preview = diff[:2000] + ("..." if len(diff) > 2000 else "")
+                console.print(Panel(preview, title="PR Diff Preview", border_style="dim"))
+
+            if focus:
+                selected_focuses = [focus]
+                console.print(f"[cyan]Using requested focus area:[/cyan] {focus.value}")
+            else:
+                progress.update(task, description="Analyzing diff for focus areas...")
+                selected_focuses = analyze_diff_for_focus_areas(diff, resolved_model)
+                selected_focuses = selected_focuses[: max(1, max_focus_areas)]
+                if not selected_focuses:
+                    selected_focuses = [ReviewFocus.GENERAL]
+                console.print(
+                    f"[cyan]AI-determined focus areas:[/cyan] {', '.join(area.value for area in selected_focuses)}"
+                )
+
+            progress.update(task, description="Loading model...")
             try:
-                ai_model = llm.get_model(model)
+                ai_model = llm.get_model(resolved_model)
             except llm.UnknownModelError:
-                console.print(f"[red]Error:[/red] Unknown model '{model}'")
+                console.print(f"[red]Error:[/red] Unknown model '{resolved_model}'")
                 console.print("Available models: " + ", ".join([m.model_id for m in llm.get_models()]))
                 raise typer.Exit(1)
-            
-            response = ai_model.prompt(prompt)
-            review_text = response.text()
-    
-    except sp.CalledProcessError as e:
-        console.print(f"[red]Error:[/red] Failed to fetch PR: {e}")
+            except Exception as exc:  # pragma: no cover - unexpected LLM backend failure
+                console.print(f"[red]Error:[/red] Failed to load model '{resolved_model}': {exc}")
+                raise typer.Exit(1)
+
+            all_reviews: list[tuple[ReviewFocus, str]] = []
+            for index, focus_area in enumerate(selected_focuses, start=1):
+                progress.update(
+                    task,
+                    description=f"Generating {focus_area.value} review ({index}/{len(selected_focuses)})...",
+                )
+                prompt = build_review_prompt(pr, diff, focus_area)
+                try:
+                    with console.status(
+                        f"[cyan]Generating {focus_area.value} insights with {resolved_model}...[/cyan]",
+                        spinner="dots",
+                    ):
+                        response = ai_model.prompt(prompt)
+                    review_output = response.text().strip()
+                    if review_output:
+                        all_reviews.append((focus_area, review_output))
+                except Exception as exc:  # pragma: no cover - LLM runtime failure
+                    console.print(
+                        f"[yellow]Warning:[/yellow] Failed to generate {focus_area.value} review: {exc}"
+                    )
+                    continue
+
+            if not all_reviews:
+                final_review_text = (
+                    "# 🤖 AI Review\n\n"
+                    "The AI was unable to generate review feedback for this pull request."
+                )
+            else:
+                if summary_only:
+                    header_title = "# 🤖 AI Review Summary"
+                else:
+                    header_title = "# 🤖 AI Review" if len(all_reviews) == 1 else "# 🤖 Autonomous AI Review"
+                meta_lines = [
+                    header_title,
+                    f"**PR #{pr.number}:** {pr.title}",
+                    f"**Author:** {pr.author} | **Size:** {pr.size_category}",
+                    f"**Branch:** {pr.head_branch} → {pr.base_branch}",
+                ]
+                if len(all_reviews) == 1:
+                    meta_lines.append(f"**Focus Area:** {all_reviews[0][0].value}")
+                else:
+                    meta_lines.append(
+                        f"**Focus Areas Reviewed:** {', '.join(area.value for area, _ in all_reviews)}"
+                    )
+
+                final_sections = ["\n".join(meta_lines)]
+
+                if summary_only:
+                    summary_sections = []
+                    for area, review_text in all_reviews:
+                        summary = extract_summary_section(review_text)
+                        if summary:
+                            summary_sections.append(
+                                f"## {area.value.title()} Summary\n\n{summary}"
+                            )
+                        else:
+                            summary_sections.append(
+                                f"## {area.value.title()} Summary\n\n(No summary available.)"
+                            )
+                    final_sections.extend(summary_sections)
+                else:
+                    review_sections = [
+                        f"## {area.value.title()} Review\n\n{review_text.strip()}"
+                        for area, review_text in all_reviews
+                    ]
+                    final_sections.extend(review_sections)
+
+                if suggest_actions and not focus and not summary_only:
+                    combined_feedback = "\n\n".join(text for _, text in all_reviews)
+                    suggestions = suggest_followup_actions(combined_feedback, pr, resolved_model)
+                    if suggestions:
+                        suggestion_lines = [
+                            "## 🤖 Suggested Follow-up Actions",
+                            *(
+                                f"{idx}. {item}"
+                                for idx, item in enumerate(suggestions, 1)
+                            ),
+                        ]
+                        final_sections.append("\n".join(suggestion_lines))
+
+                final_review_text = "\n\n---\n\n".join(final_sections)
+
+    except sp.CalledProcessError as exc:
+        console.print(f"[red]Error:[/red] Failed to fetch PR: {exc}")
         raise typer.Exit(1)
-    
-    # Display the review
-    console.print(Panel.fit(
-        f"[bold]PR #{pr.number}:[/bold] {pr.title}\n"
-        f"[dim]by {pr.author} | {pr.size_category} ({pr.changed_files} files)[/dim]",
-        border_style="cyan"
-    ))
-    
-    console.print(Markdown(review_text))
-    
-    # Optionally post to GitHub
+
+    if not final_review_text:
+        final_review_text = (
+            "# 🤖 AI Review\n\n"
+            "No review content was generated. Try rerunning with a different focus."
+        )
+
+    if pr is not None:
+        panel_text = (
+            f"[bold]PR #{pr.number}:[/bold] {pr.title}\n"
+            f"[dim]by {pr.author} | {pr.size_category} ({pr.changed_files} files)[/dim]"
+        )
+    else:
+        panel_text = f"[bold]PR #{pr_number}[/bold]"
+
+    console.print(Panel.fit(panel_text, border_style="cyan"))
+    console.print(Markdown(final_review_text))
+
     if post:
         console.print("\n[yellow]Posting review to GitHub...[/yellow]")
-        comment_body = f"## 🤖 AI Review (Focus: {focus.value})\n\n{review_text}\n\n---\n*Generated by pr-review using {model}*"
+        descriptor_parts = []
+        if not focus:
+            descriptor_parts.append("auto-focus")
+        if summary_only:
+            descriptor_parts.append("summary-only")
+        descriptor = f" ({', '.join(descriptor_parts)})" if descriptor_parts else ""
+        comment_body = (
+            f"{final_review_text}\n---\n"
+            f"*Generated by pr-review using {resolved_model}{descriptor}*"
+        )
         try:
             GitHubCLI.post_review_comment(pr_number, comment_body, repo)
             console.print("[green]✓ Review posted successfully![/green]")
-        except sp.CalledProcessError as e:
-            console.print(f"[red]Error posting review:[/red] {e}")
+        except sp.CalledProcessError as exc:
+            console.print(f"[red]Error posting review:[/red] {exc}")
+
 
 
 @app.command()
@@ -1442,14 +2229,14 @@ def check(
         prs = GitHubCLI.list_prs_to_review(repo, limit)
         
         if not prs:
-            console.print("[green]No open pull requests found.[/green]")
+            console.print("[green]No pull requests currently requesting your review.[/green]")
             return
         
         table = format_pr_table(prs)
         console.print(table)
         
-        console.print(f"\n[dim]Found {len(prs)} open PR(s)")
-        console.print("Use [cyan]pr-review review <number>[/cyan] to review a specific PR[/dim]")
+        console.print(f"\n[dim]Found {len(prs)} pull request(s) requesting your review.[/dim]")
+        console.print("[dim]Run [cyan]./pr_review.py review <number>[/cyan] to start an AI review.[/dim]")
         
     except sp.CalledProcessError as e:
         console.print(f"[red]Error:[/red] Failed to fetch PRs: {e}")
@@ -1460,7 +2247,7 @@ def check(
 def models() -> None:
     """List available AI models.
 
-    Displays a table of installed LLM models and their providers.
+    Displays a table of installed LLM models, their providers, and structured output support.
     """
     models = llm.get_models()
     if not models:
@@ -1471,12 +2258,37 @@ def models() -> None:
     table = Table(title="Available Models")
     table.add_column("Model ID", style="cyan")
     table.add_column("Provider", style="yellow")
+    table.add_column("Structured Output", style="white")
     
     for model in models:
-        provider = model.model_id.split("-")[0] if "-" in model.model_id else "unknown"
-        table.add_row(model.model_id, provider)
+        provider = getattr(model, "provider", None) or (
+            model.model_id.split("-", 1)[0] if "-" in model.model_id else "unknown"
+        )
+        supports_structured = model_supports_structured_output(model)
+        structured_label = "[green]Yes[/green]" if supports_structured else "[red]No[/red]"
+        table.add_row(model.model_id, str(provider), structured_label)
     
     console.print(table)
+
+
+@app.command()
+def configure() -> None:
+    """Configure the default LLM model."""
+
+    current_model = get_default_model()
+
+    console.print("\n[bold]Configure Default Model[/bold]")
+    console.print(f"The current default model is: [cyan]{current_model}[/cyan]")
+
+    new_model = typer.prompt("Enter new default model name", default=current_model).strip()
+
+    if new_model:
+        config = load_config()
+        config["model"] = new_model
+        save_config(config)
+        console.print(f"[green]✓ Default model updated to: [bold]{new_model}[/bold][/green]")
+    else:
+        console.print("[yellow]No changes made.[/yellow]")
 
 
 if __name__ == "__main__":
