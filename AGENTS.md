@@ -17,7 +17,7 @@
 
 - Target Python 3.11+, follow PEP 8 with 4-space indentation, and keep functions small and composable.
 - Name agents with concise snake_case filenames describing their job (e.g., `lintfix.py`). Use snake_case for functions and PascalCase for classes.
-- Begin every script with a docstring covering purpose, usage examples, and configuration. Treat Typer command callbacks as public API: include type hints and descriptive option help.
+- Begin every script with a numpy docstring covering purpose, following PEP best practices. Treat Typer command callbacks as public API: include type hints and descriptive option help.
 - When formatting output with Rich, stick to semantic colors (`green` for success, `red` for errors) to keep UX consistent across agents.
 
 ## Testing Guidelines
