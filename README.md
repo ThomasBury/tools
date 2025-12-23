@@ -135,6 +135,8 @@ Quick AI-powered code reviews without external dependencies.
 - Multiple focus areas (security, performance, style)
 - Syntax highlighting in terminal
 - Project context awareness
+- Glob-based include/exclude filters and a dry-run preview mode
+- Consistent Markdown output (summary, grade, severity-grouped findings, actionable review points, metadata) in a neutral tone
 
 **Usage:**
 
@@ -147,6 +149,12 @@ Quick AI-powered code reviews without external dependencies.
 
 # Security-focused review
 ./code_review.py review . --focus security
+
+# Preview file selection without running an AI review
+./code_review.py review src/ --dry-run
+
+# Only review matching files
+./code_review.py review . --include 'api/**/*.py' --exclude 'tests/*'
 
 # Quick single-file review
 ./code_review.py quick main.py
