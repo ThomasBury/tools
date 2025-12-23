@@ -57,7 +57,9 @@ import os
 import re
 import subprocess as sp
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Callable
 
@@ -83,6 +85,104 @@ MAX_FILE_SIZE = int(os.environ.get("CODE_REVIEW_MAX_SIZE", "100000"))  # 100KB
 MAX_PROMPT_FILES = int(os.environ.get("CODE_REVIEW_MAX_PROMPT_FILES", "25"))
 MAX_PROMPT_BYTES = int(os.environ.get("CODE_REVIEW_MAX_PROMPT_BYTES", "200000"))
 PROMPT_SUMMARY_LIMIT = 10
+REVIEW_OUTPUT_GUIDANCE_TEMPLATE = """
+You are an expert code reviewer. Respond in a **neutral, professional tone** with **zero conversational filler or flattery**.
+Don't soften critiques—be direct and specific. Use bullet points and numbered lists for clarity.
+Expose blind spots and hidden risks. Prioritize correctness, security, performance, and maintainability.
+If the reasonning is weak or uncertain, explicitly state this in your findings.
+
+**STRICTLY FOLLOW THIS STRUCTURE AND FORMATTING:**
+
+---
+
+## Summary
+Provide **exactly two concise sentences**:
+1.  Overall code health and quality.
+2.  The most notable risks or necessary improvements.
+
+---
+
+## Grade
+Provide **one letter grade** (A, B, C, D, F) and **one single-sentence justification**.
+
+---
+
+## Findings
+Organize findings under these severity headings **in this exact order**: `High`, `Medium`, `Low`.
+
+Under each severity, use **numbered entries** starting `F1`, `F2`, etc.
+Each entry **MUST** follow this format:
+`F#. [Category] Short title — explanation referencing specific files/lines (path.py:123).`
+
+**If a severity level has NO findings, write ONLY: `None`**
+
+### High
+(Findings here or `None`)
+
+### Medium
+(Findings here or `None`)
+
+### Low
+(Findings here or `None`)
+
+---
+
+## YAML Findings List (STRICTLY VALID YAML)
+
+Output a **strictly valid YAML list** of all findings. Use double quotes for all string values.
+
+**YAML Schema:**
+```yaml
+- id: "Fx"
+  title: "Short title"
+  severity: "High" | "Medium" | "Low"
+  category: "Syntax" | "Correctness" | "Security" | "Performance" | "Architecture" | "Maintainability" | "Readability" | "Typing" | "Testing" | "Documentation"
+  files:
+    - "path.py:line" # Must be non-empty; use ["unknown:0"] if exact file/line is unavailable.
+  action: "One-sentence remediation step"
+````
+
+**If there are NO findings in total across ALL severities, output ONLY: `[]`**
+
+-----
+
+## Recommendations
+
+Provide a bulleted list mapping **recommended actions** to their finding IDs (e.g., `Fix input validation (F2)`). **Only focus on actions that significantly improve safety, performance, correctness, or maintainability.**
+
+"""
+
+
+def build_output_guidance(metadata_block: str) -> str:
+    """Return the structured output instructions with embedded metadata."""
+
+    return REVIEW_OUTPUT_GUIDANCE_TEMPLATE.format(metadata=metadata_block)
+
+
+def generate_metadata_entries(
+    focus_label: str,
+    model_name: str,
+    scope: Path,
+    git_status: str | None = None,
+    git_branch: str | None = None,
+    git_commit: str | None = None,
+) -> str:
+    """Create metadata bullet points for the AI response."""
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z")
+    entries = [
+        f"- Timestamp (UTC): {timestamp}",
+        f"- Focus: {focus_label}",
+        f"- Model: {model_name}",
+        f"- Scope Root: {scope}",
+    ]
+    if git_branch:
+        entries.append(f"- Git Branch: {git_branch}")
+    if git_commit:
+        entries.append(f"- Git Commit: {git_commit}")
+    if git_status:
+        entries.append(f"- Git Status: {git_status}")
+    return "\n".join(entries)
 
 class ReviewFocus(str, Enum):
     """Types of review focus.
@@ -517,6 +617,72 @@ def find_python_files(
 
     return sorted(files), truncated
 
+
+def path_for_display(file_path: Path, base: Path | None) -> str:
+    """Return a human-friendly path relative to ``base`` when possible."""
+
+    if base:
+        try:
+            return file_path.relative_to(base).as_posix()
+        except ValueError:
+            pass
+    return file_path.as_posix()
+
+
+def apply_path_filters(
+    files: list[Path],
+    include_patterns: list[str],
+    exclude_patterns: list[str],
+    base: Path | None,
+) -> tuple[list[Path], list[str], list[str]]:
+    """Filter files using optional glob-based include/exclude patterns."""
+
+    include_patterns = [pattern for pattern in include_patterns if pattern]
+    exclude_patterns = [pattern for pattern in exclude_patterns if pattern]
+
+    filtered: list[Path] = []
+    include_skips: list[str] = []
+    exclude_skips: list[str] = []
+
+    for file in files:
+        rel_path = path_for_display(file, base)
+
+        if exclude_patterns and any(fnmatch(rel_path, pattern) for pattern in exclude_patterns):
+            exclude_skips.append(rel_path)
+            continue
+
+        if include_patterns and not any(fnmatch(rel_path, pattern) for pattern in include_patterns):
+            include_skips.append(rel_path)
+            continue
+
+        filtered.append(file)
+
+    return filtered, include_skips, exclude_skips
+
+
+def resolve_llm_model(model_id: str) -> llm.Model:
+    """Return an installed LLM model or exit with an actionable error."""
+
+    try:
+        return llm.get_model(model_id)
+    except Exception as exc:
+        console.print(f"[red]Unable to load LLM model '{model_id}'.[/red]")
+
+        available_models = [model.model_id for model in llm.get_models()]
+        if available_models:
+            console.print("[yellow]Available models:[/yellow] " + ", ".join(available_models[:5]))
+            if len(available_models) > 5:
+                console.print(f"...and {len(available_models) - 5} more")
+        else:
+            console.print(
+                "[yellow]No LLM plugins appear to be installed.[/yellow] "
+                "Install one with `uv tool install llm-gemini` or another provider plugin."
+            )
+
+        console.print(f"[red]Underlying error:[/red] {exc}")
+        raise typer.Exit(1)
+
+
 def read_code_file(file: Path, max_size: int = MAX_FILE_SIZE) -> CodeFile | None:
     """Read a code file with size limits.
 
@@ -698,7 +864,13 @@ def get_project_context(root: Path) -> str:
     return "\n".join(context_parts) if context_parts else ""
 
 
-def render_review_summary(files: list[CodeFile], focus: ReviewFocus, git_status: str | None, project_context: str) -> Group:
+def render_review_summary(
+    files: list[CodeFile],
+    focus: ReviewFocus,
+    git_status: str | None,
+    project_context: str,
+    display_root: Path | None = None,
+) -> Group:
     """Build a Rich renderable summarizing files and metadata.
 
     Parameters
@@ -711,6 +883,8 @@ def render_review_summary(files: list[CodeFile], focus: ReviewFocus, git_status:
         The current git status of the repository.
     project_context : str
         The project context, such as project name and dependencies.
+    display_root : Path | None, optional
+        Base folder used to show relative paths for file statistics.
 
     Returns
     -------
@@ -733,7 +907,7 @@ def render_review_summary(files: list[CodeFile], focus: ReviewFocus, git_status:
 
     return Group(
         Panel(summary_table, title="Review Summary", border_style="blue"),
-        format_file_stats(files)
+        format_file_stats(files, base_path=display_root),
     )
 
 
@@ -765,6 +939,7 @@ def build_review_prompt(
     files: list[CodeFile],
     focus: ReviewFocus,
     context: str,
+    metadata_text: str,
     sanitized_contents: dict[Path, str] | None = None,
 ) -> str:
     """
@@ -785,6 +960,8 @@ def build_review_prompt(
     context : str
         Additional context or background information about the code or project
         to guide the review.
+    metadata_text : str
+        Pre-rendered metadata bullet list that must be included in the output.
     sanitized_contents : dict[Path, str] | None, optional
         Optional mapping of file paths to sanitized content that has been
         scrubbed of secrets. When provided, these contents are embedded
@@ -801,7 +978,8 @@ def build_review_prompt(
     >>> files_to_review = [CodeFile(Path("src/main.py"), 150), CodeFile(Path("src/utils.py"), 80)]
     >>> review_focus = ReviewFocus.GENERAL
     >>> project_context = "This is a new feature for user authentication."
-    >>> prompt = build_review_prompt(files_to_review, review_focus, project_context)
+    >>> metadata = "- Timestamp (UTC): 2024-01-01 00:00:00 UTC"
+    >>> prompt = build_review_prompt(files_to_review, review_focus, project_context, metadata)
     >>> print(prompt[:50] + "...") # Print a snippet of the generated prompt
     Review Request: ...
     """
@@ -861,6 +1039,8 @@ Focus on code style and conventions:
         for f in files
     ])
 
+    output_guidance = build_output_guidance(metadata_text)
+
     prompt = f"""You are an expert code reviewer. Review the following code files with a focus on '{focus.value}'.
 
 {focus_instructions[focus]}
@@ -874,19 +1054,21 @@ Focus on code style and conventions:
 ## Code to Review
 {code_content}
 
-Please provide a structured review in Markdown format. Identify strengths, weaknesses, and specific, actionable suggestions for improvement.
+{output_guidance}
 """
 
     return prompt
 
 
-def format_file_stats(files: list[CodeFile]) -> Table:
+def format_file_stats(files: list[CodeFile], base_path: Path | None = None) -> Table:
     """Create a table of files to review.
 
     Parameters
     ----------
     files : list[CodeFile]
         A list of CodeFile objects to be displayed in the table.
+    base_path : Path | None, optional
+        Directory used to render relative file paths for clarity.
 
     Returns
     -------
@@ -914,8 +1096,9 @@ def format_file_stats(files: list[CodeFile]) -> Table:
     total_size = 0
 
     for file in files:
+        display_path = path_for_display(file.path, base_path)
         table.add_row(
-            str(file.path.name),
+            display_path,
             str(file.lines),
             f"{file.size:,} bytes"
         )
@@ -992,6 +1175,34 @@ def check_git_status(path: Path) -> str | None:
     return "Git repository (clean)"
 
 
+def get_git_branch_and_commit(path: Path) -> tuple[str | None, str | None]:
+    """Return the current branch name and short commit hash for the repo containing path."""
+
+    git_root = get_repo_root(path)
+    if not git_root:
+        return None, None
+
+    def _run_git(args: list[str]) -> str | None:
+        try:
+            result = sp.run(
+                ["git", *args],
+                cwd=git_root,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except (FileNotFoundError, OSError, sp.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
+
+    branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+    commit = _run_git(["rev-parse", "--short", "HEAD"])
+    return branch, commit
+
+
 @app.command()
 def review(
     path: Path = typer.Argument(..., help="File or directory to review"),
@@ -999,6 +1210,23 @@ def review(
     model: str = typer.Option(DEFAULT_MODEL, "--model", "-m", help="LLM model to use"),
     max_files: int = typer.Option(10, "--max-files", help="Maximum files to review"),
     show_code: bool = typer.Option(False, "--show-code", "-s", help="Show code snippets in terminal"),
+    include: list[str] = typer.Option(
+        [],
+        "--include",
+        "-i",
+        help="Glob patterns to include (repeatable). Paths evaluated relative to the target path.",
+    ),
+    exclude: list[str] = typer.Option(
+        [],
+        "--exclude",
+        "-e",
+        help="Glob patterns to exclude (repeatable). Paths evaluated relative to the target path.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview file selection and context without sending code to the AI model.",
+    ),
     output: Path | None = typer.Option(
         None,
         "--output",
@@ -1027,6 +1255,13 @@ def review(
         Maximum number of files to review. Default is 10.
     show_code : bool, optional
         Whether to display code snippets in the terminal. Default is False.
+    include : list[str], optional
+        One or more glob patterns to include. When provided, only matching
+        paths (relative to ``path``) are reviewed.
+    exclude : list[str], optional
+        One or more glob patterns to exclude from the review.
+    dry_run : bool, optional
+        When True, displays the planned review summary without invoking the AI.
 
     Returns
     -------
@@ -1090,6 +1325,36 @@ def review(
                 f"[yellow]Found more than {max_files} Python files, reviewing first {max_files}[/yellow]"
             )
 
+        files, include_skipped, exclude_skipped = apply_path_filters(
+            files,
+            include_patterns=include,
+            exclude_patterns=exclude,
+            base=scope_root,
+        )
+
+        def _print_suppressed(message: str, entries: list[str]) -> None:
+            console.print(message)
+            for rel in entries[:5]:
+                console.print(f"  - {rel}")
+            if len(entries) > 5:
+                console.print("  - ...")
+
+        if include and include_skipped:
+            _print_suppressed(
+                f"[yellow]{len(include_skipped)} file(s) skipped because they did not match --include[/yellow]",
+                include_skipped,
+            )
+
+        if exclude and exclude_skipped:
+            _print_suppressed(
+                f"[yellow]{len(exclude_skipped)} file(s) removed via --exclude[/yellow]",
+                exclude_skipped,
+            )
+
+        if not files:
+            console.print("[yellow]No Python files matched the provided include/exclude filters.[/yellow]")
+            raise typer.Exit(0)
+
         progress.update(task, description="Reading files...")
         code_files = [cf for f in files if (cf := read_code_file(f))]
         if not code_files:
@@ -1122,9 +1387,25 @@ def review(
                 console.print(f"  - {warning}")
 
         git_status = check_git_status(context_root)
+        git_branch, git_commit = get_git_branch_and_commit(context_root)
         project_context = get_project_context(context_root)
-        timeline = render_review_summary(code_files, focus, git_status, project_context)
+        timeline = render_review_summary(
+            code_files,
+            focus,
+            git_status,
+            project_context,
+            display_root=context_root,
+        )
         console.print(timeline)
+
+        metadata_entries = generate_metadata_entries(
+            focus_label=focus.value,
+            model_name=model,
+            scope=context_root,
+            git_status=git_status,
+            git_branch=git_branch,
+            git_commit=git_commit,
+        )
 
         if show_code:
             for code_file in code_files:
@@ -1134,11 +1415,21 @@ def review(
                     border_style="green"
                 ))
 
+        if dry_run:
+            console.print("[green]Dry run complete. Re-run without --dry-run to generate an AI review.[/green]")
+            return
+
         progress.update(task, description="Generating AI review...")
-        prompt = build_review_prompt(code_files, focus, project_context, sanitized_contents)
+        prompt = build_review_prompt(
+            code_files,
+            focus,
+            project_context,
+            metadata_entries,
+            sanitized_contents,
+        )
+        ai_model = resolve_llm_model(model)
 
         try:
-            ai_model = llm.get_model(model)
             response = ai_model.prompt(prompt)
             review_text = response.text()
         except Exception as e:
@@ -1225,26 +1516,40 @@ def quick(
         )
         console.print("  - " + ", ".join(secret_warnings))
 
+    git_status = check_git_status(path.parent)
+    git_branch, git_commit = get_git_branch_and_commit(path.parent)
+    metadata_entries = generate_metadata_entries(
+        focus_label="quick",
+        model_name=model,
+        scope=path.parent,
+        git_status=git_status,
+        git_branch=git_branch,
+        git_commit=git_commit,
+    )
+    output_guidance = build_output_guidance(metadata_entries)
+
     # Simple prompt for quick review
-    prompt = f"""Quickly review this Python code. Focus on:
+    prompt = f"""Provide a rapid triage review of the following Python file. Prioritize:
 1. Critical bugs or security issues
 2. Major performance problems
-3. Serious code quality issues
+3. Serious code quality risks that block merges
 
-Be brief and actionable. List only important issues.
+Keep the tone neutral and data-driven.
 
 File: {path.name}
 ```python
 {sanitized_content}
 ```
+
+{output_guidance}
 """
     
     console.print(render_quick_summary(code_file))
     console.print(f"[cyan]Quick review of {path.name}...[/cyan]")
     
+    ai_model = resolve_llm_model(model)
     try:
-        model = llm.get_model(model)
-        response = model.prompt(prompt)
+        response = ai_model.prompt(prompt)
         review_text = response.text()
 
         console.print(Panel(
